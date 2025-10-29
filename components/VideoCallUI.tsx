@@ -1,91 +1,112 @@
+import React, { useEffect, useRef, useState } from "react";
+import { useAppContext } from "../context/AppContext";
 
-import React, { useRef } from 'react';
-import { useAppContext } from '../context/AppContext';
-import { Room, User } from '../types';
-import { VideoOffIcon, ZoomInIcon } from './Icons';
-import { toast } from 'react-toastify';
+// Egyszerű WebRTC peer connection management PHP signalinggel
+export default function VideoCallUI({ room }: { room: any }) {
+  const { user, signalingMessages, sendSignaling } = useAppContext();
+  const [remoteStreams, setRemoteStreams] = useState<any[]>([]);
+  const [peerConnection, setPeerConnection] = useState<RTCPeerConnection | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
 
-interface VideoStream {
-    id: string;
-    name: string;
-    stream: MediaStream;
-    isMuted?: boolean;
-    isScreen?: boolean;
-}
+  // 1. Helyi stream bekapcsolása
+  useEffect(() => {
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+      setLocalStream(stream);
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+    });
+  }, []);
 
-const VideoPlayer = ({ videoStream }: { videoStream: VideoStream }) => {
-    const { state } = useAppContext();
-    const { isVideoOn, isScreenSharing } = state;
-    const videoRef = useRef<HTMLVideoElement>(null);
-    const containerRef = useRef<HTMLDivElement>(null);
-    const { stream, isMuted, name, isScreen } = videoStream;
+  // 2. PeerConnection setup
+  useEffect(() => {
+    if (!localStream) return;
 
-    React.useEffect(() => {
-        if (videoRef.current) videoRef.current.srcObject = stream;
-    }, [stream]);
-    
-    const handleFullScreen = () => {
-      if(containerRef.current) {
-          if (document.fullscreenElement) {
-              document.exitFullscreen();
-          } else {
-              containerRef.current.requestFullscreen().catch(err => {
-                  toast.error(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
-              });
-          }
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+
+    // Local stream hozzáadása
+    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+    // ICE candidate küldése
+    pc.onicecandidate = (event) => {
+      if (event.candidate)
+        sendSignaling("ice-candidate", JSON.stringify(event.candidate));
+    };
+
+    // Remote stream kezelése
+    pc.ontrack = (event) => {
+      setRemoteStreams((streams) => {
+        if (streams.find(s => s.id === event.streams[0].id)) return streams;
+        return [...streams, event.streams[0]];
+      });
+    };
+
+    setPeerConnection(pc);
+
+    // OFFER generálása (ha én vagyok a hívó)
+    sendSignaling("ready", "");
+
+    return () => {
+      pc.close();
+    };
+  }, [localStream]);
+
+  // 3. Signaling üzenetek feldolgozása (OFFER/ANSWER/ICE)
+  useEffect(() => {
+    if (!peerConnection) return;
+    for (const msg of signalingMessages) {
+      if (msg.user_id === user.id) continue; // saját üzenet kihagyása
+      if (msg.message_type === "offer") {
+        peerConnection.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.message)));
+        peerConnection.createAnswer().then(answer => {
+          peerConnection.setLocalDescription(answer);
+          sendSignaling("answer", JSON.stringify(answer));
+        });
+      } else if (msg.message_type === "answer") {
+        peerConnection.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.message)));
+      } else if (msg.message_type === "ice-candidate") {
+        const candidate = new RTCIceCandidate(JSON.parse(msg.message));
+        peerConnection.addIceCandidate(candidate);
+      } else if (msg.message_type === "ready") {
+        // Ha mindketten készen állnak, akkor csak az egyikük generál offer-t
+        if (peerConnection.signalingState === "stable") {
+          peerConnection.createOffer().then(offer => {
+            peerConnection.setLocalDescription(offer);
+            sendSignaling("offer", JSON.stringify(offer));
+          });
+        }
       }
     }
-    
-    // Show video if it's a screen share OR if the main video is on.
-    const showVideo = isScreen ? isScreenSharing : isVideoOn;
+  }, [signalingMessages, peerConnection]);
 
-    return (
-        <div ref={containerRef} className="bg-gray-700 aspect-video rounded-md flex items-center justify-center relative border-2 overflow-hidden group border-gray-600 h-full">
-            { showVideo ? (
-                <video ref={videoRef} autoPlay playsInline muted={isMuted} className={`w-full h-full object-contain bg-black ${isScreen ? '' : 'scale-x-[-1]'}`}></video>
-            ) : (
-                <div className="w-full h-full bg-gray-800 flex flex-col items-center justify-center">
-                    <span className="font-bold text-gray-400 text-sm">{name}</span>
-                    <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center"><VideoOffIcon className="w-8 h-8 text-white"/></div>
-                </div>
-            )}
-            <div className="absolute bottom-1 left-1 bg-black bg-opacity-50 px-2 py-0.5 text-xs rounded">{name}</div>
-            <button onClick={handleFullScreen} className="absolute top-1 right-1 bg-black bg-opacity-50 p-1 rounded-full text-white opacity-0 group-hover:opacity-100 transition-opacity" title="Toggle Fullscreen">
-                <ZoomInIcon className="w-5 h-5"/>
-            </button>
-        </div>
-    );
-};
-
-
-const VideoCallUI: React.FC<{ room: Room }> = ({ room }) => {
-  const { state } = useAppContext();
-  const { isScreenSharing, localStream, screenStream, user } = state;
-  
-  const allStreams: VideoStream[] = [];
-  if (localStream) {
-      allStreams.push({ id: 'local-stream', name: `${user.name} (You)`, stream: localStream, isMuted: true });
-  }
-  if (isScreenSharing && screenStream) {
-      allStreams.push({ id: 'screen-share', name: "Your Screen", stream: screenStream, isScreen: true });
+  // Képernyőmegosztás
+  async function startScreenShare() {
+    const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    const videoTrack = displayStream.getVideoTracks()[0];
+    if (peerConnection && localStream) {
+      const sender = peerConnection.getSenders().find(s => s.track?.kind === "video");
+      sender?.replaceTrack(videoTrack);
+      videoTrack.onended = () => {
+        sender?.replaceTrack(localStream.getVideoTracks()[0]);
+      };
+    }
   }
 
   return (
-    <header className="w-full bg-gray-900 bg-opacity-90 backdrop-blur-sm p-2 shadow-lg z-20 border-b border-gray-700 flex items-center justify-between flex-shrink-0">
-      <div className="flex items-center gap-3 h-24">
-        <h3 className="text-md font-bold text-white pr-4 border-r border-gray-600">In {room.name}</h3>
-        <div className="flex items-center gap-3 h-full">
-            {allStreams.length > 0 ? (
-                allStreams.map(videoStream => <VideoPlayer key={videoStream.id} videoStream={videoStream} />)
-            ) : (
-                <div className="bg-gray-800 aspect-video rounded-md flex items-center justify-center text-gray-400 text-sm h-full px-4">
-                    Getting camera...
-                </div>
-            )}
-        </div>
+    <div className="flex flex-col items-center bg-black py-4">
+      <div className="flex gap-2">
+        <video ref={localVideoRef} autoPlay muted className="w-48 h-36 bg-gray-800 rounded mb-2" />
+        {remoteStreams.map((stream, i) => (
+          <video key={stream.id} autoPlay
+            ref={video => video && (video.srcObject = stream)}
+            className="w-48 h-36 bg-gray-700 rounded mb-2"
+          />
+        ))}
       </div>
-    </header>
+      <button onClick={startScreenShare} className="bg-blue-700 px-4 py-2 rounded text-white mt-2">
+        Képernyő megosztása
+      </button>
+    </div>
   );
-};
-
-export default VideoCallUI;
+}
