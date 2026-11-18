@@ -11,11 +11,15 @@ Fut sima osztott tárhelyen (PHP + MySQL), nem kell hozzá npm, Node, build vagy
 - **Kamera és képernyőmegosztás** a szobán vagy a híváson belül. A képernyőmegosztás automatikusan nagyban jelenik meg.
 - **Chat:** közös csatorna, szobánkénti csatorna és privát üzenetek, előzményekkel és olvasatlan-jelzéssel. Háttérben lévő fülön asztali értesítést küld.
 - **Állapot:** Elérhető / Elfoglalt (szobában sem hallanak) / Távol.
-- **Profil:** név, szín, emoji az avataron, jelszócsere.
-- **Térképszerkesztő (admin):** szobák létrehozása, mozgatása, átméretezése, átnevezése, színe és típusa, a térkép mérete.
-- **Felhasználókezelés (admin):** felvétel, szerkesztés, jelszó visszaállítás, törlés.
-- **Zajszűrés és visszhangszűrés:** a böngésző beépített szűrői, a beállításokban kapcsolhatók. Ott választható a mikrofon, a hangszóró és a kamera is.
-- Billentyűk: nyilak vagy WASD a mozgáshoz (vagy kattints oda, ahová menni akarsz), **M** a némításhoz, **C** a chathez.
+- **Rajzolt avatarok** négy irányból, lépésanimációval. Állítható a bőrszín, a frizura, a hajszín, a felső, a nadrág és a kiegészítő (szemüveg, napszemüveg, fejhallgató, sapka).
+- **Mozgás Gather-módra:** csak fel/le/jobbra/balra (nyilak vagy WASD). Kattintásra L alakú úton megy oda.
+- **Bökés:** kattints egy kollégára → Bökés. Hangjelzést és értesítést kap, az avatarja megrázkódik. Akkor is eljut hozzá, ha nincs közvetlen kapcsolat.
+- **Profil:** név, avatar, jelszócsere.
+- **Térkép- és berendezésszerkesztő:** szobák (név, típus, szín, padló: parketta, szőnyegpadló, csempe, beton, fű) és közel 40 féle bútor: asztalok, székek, laptop, monitor, szekrények, polcok, kanapé, fotel, szőnyeg, konyha, növények, képek, falak, ajtók, ablakok, feliratok. Forgatás, átméretezés, színezés, másolás. Egy kattintással betölthető mintairoda.
+- **Külön jogosultságok:** „térkép szerkesztése” és „felhasználók kezelése” külön adható.
+- **Erős zajszűrés (RNNoise):** a mikrofon hangját a saját gépen szűri, mielőtt elküldené. Kikapcsolható, vagy választható helyette a böngésző alap szűrője.
+- **Takarékos mód:** kikapcsolja az animációkat, kevesebb gépterheléssel (beállítások).
+- Billentyűk: nyilak vagy WASD a mozgáshoz, **M** a némításhoz, **C** a chathez. A szerkesztőben: **R** forgatás, **Del** törlés, **⌘/Ctrl+D** másolás, nyilak finom mozgatás.
 
 ## Hogyan működik (és miért nem fagy)
 
@@ -32,7 +36,9 @@ Fut sima osztott tárhelyen (PHP + MySQL), nem kell hozzá npm, Node, build vagy
 3. Az `api/config.sample.php` fájlt másold le `api/config.php` néven, és írd bele az adatbázis adatait.
 4. Nyisd meg böngészőben: `https://domain.hu/iroda/install.php`. Ez létrehozza a táblákat, az alap térképet és az első admin felhasználót.
 5. **Töröld az `install.php` fájlt** a tárhelyről.
-6. Lépj be, és az Admin → Felhasználók menüben vedd fel a kollégákat.
+6. Lépj be, és a Felhasználók menüben vedd fel a kollégákat. A térképszerkesztőben a „Mintairoda betöltése” gombbal egy kész, berendezett iroda tölthető be.
+
+**Frissítés régebbi verzióról:** elég feltölteni az új fájlokat (az `api/config.php` maradjon). Az adatbázis első belépéskor magától frissül, a korábbi adminok mindkét jogot megkapják.
 
 PHP 7.4 vagy újabb kell (PDO MySQL bővítménnyel), ez minden mai tárhelyen alap.
 
@@ -56,7 +62,8 @@ install.php             egyszeri telepítő (telepítés után törlendő)
 api/index.php           az összes szerveroldali művelet
 api/config.php          beállítások (ezt te hozod létre)
 api/inc/                belső fájlok (böngészőből nem elérhetők)
-assets/js/              kliens: app, rtc (WebRTC), map, chat, ui, media, store, util
+assets/js/              kliens: app, rtc (WebRTC), map, editor, avatar, furniture, chat, ui, media, store, util
+assets/vendor/rnnoise/  zajszűrő (MIT licenc, a forrás a SOURCE.txt-ben)
 assets/css/app.css      megjelenés
 ```
 

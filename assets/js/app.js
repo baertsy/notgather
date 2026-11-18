@@ -44,6 +44,7 @@ function applyMe(me) {
   S.iceServers = me.iceServers;
   S.world = me.world;
   S.zones = me.zones;
+  S.items = me.items || [];
   document.title = S.appName;
   if (me.lastPos) { S.local.x = me.lastPos.x; S.local.y = me.lastPos.y; }
   else {
@@ -142,6 +143,7 @@ async function enterOffice() {
     onMessage: (id) => chat.openConversation('d:' + id),
     onCall: startCall,
     onEndCall: endCall,
+    onPoke: sendPoke,
     onEditSelect: (z) => ui.renderEditPanel(z),
   });
   chat.initChat($('#app'), {
@@ -153,9 +155,9 @@ async function enterOffice() {
   });
   ui.initUi({ barContainer: $('#app'), stageContainer: $('#stage-wrap'), mapContainer: $('#map') }, {
     toggleMic, toggleCam, toggleScreen, endCall, setStatus, logout,
-    restartMic, applySpeaker,
+    restartMic, applySpeaker, applyLowRes,
     profileChanged: () => { broadcastState(); map.updateAvatar(S.me.id); ui.renderBar(); },
-    mapSaved: () => { S.local.zone = map.currentZoneId(); map.renderZones(); broadcastState(); refreshMedia(); emit('zone'); },
+    mapSaved: () => { S.local.zone = map.currentZoneId(); map.renderZones(); map.renderItems(); broadcastState(); refreshMedia(); emit('zone'); },
   });
 
   S.local.zone = map.currentZoneId();
@@ -173,7 +175,7 @@ async function enterOffice() {
   window.addEventListener('online', () => requestSync());
   document.addEventListener('visibilitychange', () => { if (!document.hidden) requestSync(); updateTitle(); });
   on('unread', updateTitle);
-  setInterval(speakingTick, 150);
+  applyLowRes();
   sync();
 }
 
@@ -191,7 +193,7 @@ function publicState() {
   return {
     x: Math.round(S.local.x), y: Math.round(S.local.y), zone: S.local.zone, status: S.local.status,
     mic: S.local.mic, cam: S.local.cam, screen: S.local.screen, call: S.local.call,
-    name: S.me.name, color: S.me.color, emoji: S.me.emoji,
+    dir: S.local.dir || 'down', name: S.me.name, avatar: S.me.avatar,
   };
 }
 
@@ -229,7 +231,10 @@ async function sync() {
     if (failures >= 3) toast('Újra kapcsolódva a szerverhez.', { type: 'ok' });
     failures = 0;
     applyUsers(res.users);
-    for (const s of res.signals) pm.handleSignal(s.from, s.user, s.data);
+    for (const s of res.signals) {
+      if (s.data?.type === 'poke') receivePoke(s.user);
+      else pm.handleSignal(s.from, s.user, s.data);
+    }
     if (res.messages.length) chat.addMessages(res.messages);
     if (res.mapVersion !== S.world.version && !map.isEditing()) reloadMap();
   } catch (e) {
@@ -278,8 +283,10 @@ function reloadMap() {
   api('me').then((me) => {
     S.world = me.world;
     S.zones = me.zones;
+    S.items = me.items || [];
     S.local.zone = map.currentZoneId();
     map.renderZones();
+    map.renderItems();
     broadcastState();
     refreshMedia();
     emit('zone');
@@ -329,7 +336,10 @@ function onLocalMove(final = false) {
     return;
   }
   const now = performance.now();
-  const send = () => { lastPosSent = performance.now(); pm.broadcast({ t: 'pos', x: Math.round(S.local.x), y: Math.round(S.local.y) }); };
+  const send = () => {
+    lastPosSent = performance.now();
+    pm.broadcast({ t: 'pos', x: Math.round(S.local.x), y: Math.round(S.local.y), d: S.local.dir || 'down', mv: !final && !!S.local.moving });
+  };
   clearTimeout(posTimer);
   if (final || now - lastPosSent > 80) send();
   else posTimer = setTimeout(send, 80);
@@ -416,8 +426,8 @@ function onPeerData(peer, msg) {
       const prevKey = [u.zone, u.status, u.call, u.cam, u.screen].join('|');
       for (const f of LIVE_FIELDS) if (f in msg) u[f] = msg[f];
       if (typeof msg.name === 'string') u.name = msg.name.slice(0, 40);
-      if (typeof msg.color === 'string') u.color = msg.color;
-      if (typeof msg.emoji === 'string') u.emoji = msg.emoji.slice(0, 4);
+      if (msg.avatar && typeof msg.avatar === 'object') u.avatar = msg.avatar;
+      if (DIRS.includes(msg.dir)) u.dir = msg.dir;
       map.updateAvatar(u.id);
       if (prevKey !== [u.zone, u.status, u.call, u.cam, u.screen].join('|')) refreshMedia();
       emit('users');
@@ -429,7 +439,15 @@ function onPeerData(peer, msg) {
       if (!u) return;
       u.x = Number(msg.x) || 0;
       u.y = Number(msg.y) || 0;
+      if (DIRS.includes(msg.d)) u.dir = msg.d;
+      u.moving = !!msg.mv;
+      // ha a "megálltam" üzenet elveszne, magától is leáll a lépésanimáció
+      clearTimeout(u._walkT);
+      if (u.moving) u._walkT = setTimeout(() => { u.moving = false; map.updateAvatar(u.id); }, 400);
       map.updateAvatar(u.id);
+      break;
+    case 'poke':
+      receivePoke(peer.userId);
       break;
     case 'chat':
       if (msg.m && msg.m.senderId === peer.userId) chat.addMessages([msg.m]);
@@ -615,10 +633,55 @@ function beep(freq = 880, dur = 0.12, when = 0) {
   } catch { /* */ }
 }
 
+// ======================================================================= bökés
+
+const DIRS = ['down', 'up', 'left', 'right'];
+const pokeSent = new Map();
+const pokeRecv = new Map();
+
+function sendPoke(userId) {
+  const u = S.users.get(userId);
+  if (!u || !u.online) return toast('Csak online kollégát lehet megbökni.');
+  const now = Date.now();
+  if (now - (pokeSent.get(userId) || 0) < 3000) return;
+  pokeSent.set(userId, now);
+  // ha nincs közvetlen kapcsolat, a szerveren át megy
+  if (!pm.sendToUser(userId, { t: 'poke' }) && u.peerId) {
+    outbox.push({ to: u.peerId, data: { type: 'poke' }, at: now });
+    requestSync();
+  }
+  map.shake(userId);
+  toast(`👉 Megbökted: ${u.name}`, { timeout: 2000 });
+}
+
+function receivePoke(fromId) {
+  const now = Date.now();
+  if (now - (pokeRecv.get(fromId) || 0) < 2000) return;
+  pokeRecv.set(fromId, now);
+  const name = S.users.get(fromId)?.name || 'Valaki';
+  beep(523, 0.09); beep(784, 0.09, 0.11); beep(1046, 0.14, 0.22);
+  map.shake(S.me.id);
+  toast(`👉 ${name} bökdös téged!`, {
+    timeout: 8000,
+    actions: [{ label: 'Visszabököm', onClick: () => sendPoke(fromId) }, { label: 'Üzenet', primary: true, onClick: () => chat.openConversation('d:' + fromId) }],
+  });
+  notify(`👉 ${name} bökdös`, 'Kattints ide az irodához.', true);
+}
+
+// ======================================================================= takarékos mód
+
+let speakTimer = null;
+function applyLowRes() {
+  const low = !!media.prefs.lowRes;
+  document.body.classList.toggle('low-res', low);
+  clearInterval(speakTimer);
+  speakTimer = setInterval(speakingTick, low ? 500 : 150);
+}
+
 function ring() { beep(660, 0.15); beep(880, 0.15, 0.2); }
 
-function notify(title, body) {
-  if (!document.hidden || !('Notification' in window) || Notification.permission !== 'granted') return;
+function notify(title, body, always = false) {
+  if ((!always && !document.hidden) || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
     const n = new Notification(title, { body, tag: 'ng-' + title });
     n.onclick = () => { window.focus(); n.close(); };
@@ -641,7 +704,7 @@ function updateTitle() {
 }
 
 // Hibakereséshez a böngésző konzolából: __ng.S, __ng.pm
-window.__ng = { S, get pm() { return pm; }, walkTo: (x, y) => map.walkTo({ x, y }) };
+window.__ng = { S, media, get pm() { return pm; }, walkTo: (x, y) => map.walkTo({ x, y }) };
 
 boot();
 export { ICONS };

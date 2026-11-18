@@ -31,6 +31,7 @@ $sql = (string)file_get_contents(__DIR__ . '/api/inc/schema.sql');
 foreach (array_filter(array_map('trim', explode(';', $sql))) as $stmt) {
     $pdo->exec($stmt);
 }
+ng_migrate();
 
 // Alap térkép, ha még nincs egy szoba sem
 if ((int)$pdo->query('SELECT COUNT(*) FROM ng_zones')->fetchColumn() === 0) {
@@ -61,10 +62,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     } elseif (strlen($pass) < 6) {
         $error = 'A jelszó legalább 6 karakter legyen.';
     } else {
-        $pdo->prepare('INSERT INTO ng_users (username, pass_hash, display_name, color, is_admin, created_at) VALUES (?, ?, ?, ?, 1, ?)')
-            ->execute([$username, password_hash($pass, PASSWORD_DEFAULT), $name === '' ? $username : $name, '#3b82f6', time()]);
+        $pdo->prepare('INSERT INTO ng_users (username, pass_hash, display_name, color, avatar, is_admin, perm_map, perm_users, created_at) VALUES (?, ?, ?, ?, ?, 1, 1, 1, ?)')
+            ->execute([$username, password_hash($pass, PASSWORD_DEFAULT), $name === '' ? $username : $name, '#3b82f6', json_encode(ng_avatar_default()), time()]);
         page('<p class="ok">Kész! Létrejött az admin felhasználó.</p><p>Most <strong>töröld az <code>install.php</code> fájlt</strong> '
-            . 'a tárhelyről, majd lépj be. A többi kollégát az irodában, az Admin menüben veheted fel.</p>'
+            . 'a tárhelyről, majd lépj be. A többi kollégát az irodában, a Felhasználók menüben veheted fel.</p>'
             . '<p><a class="btn primary" href="./">Belépés</a></p>');
     }
 }

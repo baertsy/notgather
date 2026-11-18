@@ -1,7 +1,8 @@
 // Chat: közös csatorna, szobánkénti csatorna és privát üzenetek.
 
 import { S, emit, on, convKeyOf, zoneById } from './store.js';
-import { el, api, linkify, timeLabel, ICONS, toast, initials } from './util.js';
+import { el, api, linkify, timeLabel, ICONS, toast } from './util.js';
+import { avatarSVG } from './avatar.js';
 
 let panel, listEl, msgsEl, inputEl, titleEl;
 let open = false;
@@ -74,14 +75,14 @@ let listKey = '';
 function renderList() {
   if (!listEl || !S.me) return;
   const items = convs();
-  const key = JSON.stringify([current, items.map((c) => [c.key, c.label, c.user?.online, c.user?.color, c.user?.emoji, S.unread.get(c.key) || 0])]);
+  const key = JSON.stringify([current, items.map((c) => [c.key, c.label, c.user?.online, c.user?.avatar, S.unread.get(c.key) || 0])]);
   if (key === listKey) return;
   listKey = key;
   listEl.innerHTML = '';
   for (const c of items) {
     const n = S.unread.get(c.key) || 0;
     const item = el('button', { class: `chat-conv ${c.key === current ? 'active' : ''} ${c.user && !c.user.online ? 'offline' : ''}`, onclick: () => { current = c.key; markRead(c.key); renderList(); renderMessages(); inputEl.focus(); } },
-      c.user ? el('span', { class: 'mini-av', style: { background: c.user.color } }, c.user.emoji || initials(c.user.name)) : null,
+      c.user ? el('span', { class: 'mini-av', html: avatarSVG(c.user.avatar, 'down', { head: true }) }) : null,
       el('span', { class: 'conv-label' }, c.label),
       n ? el('span', { class: 'badge' }, n > 99 ? '99+' : n) : null);
     listEl.append(item);
