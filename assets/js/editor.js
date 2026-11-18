@@ -2,7 +2,8 @@
 
 import { el, ICONS } from './util.js';
 import * as map from './map.js';
-import { CATALOG, CATEGORIES, previewSVG, sampleOffice } from './furniture.js';
+import { CATALOG, CATEGORIES, previewSVG } from './furniture.js';
+import { sampleOffice } from './template.js';
 
 let panel = null;
 let hooks = {};
@@ -45,7 +46,7 @@ export function render(sel) {
   else renderZonesTab(st, sel);
 
   panel.append(el('div', { class: 'edit-foot' },
-    el('p', { class: 'muted-text small' }, 'Billentyűk: R forgatás, Del törlés, ⌘/Ctrl+D másolás, nyilak finom mozgatás (Shift: 10 px), Alt húzás közben: rács nélkül.'),
+    el('p', { class: 'muted-text small' }, 'Billentyűk: R forgatás, Del törlés, ⌘/Ctrl+D másolás, nyilak finom mozgatás (Shift: 10 px), Alt húzás közben: rács nélkül. A falak, ajtók, ablakok a „Fal, ajtó” kategóriában vannak; függőlegeshez forgasd el (R).'),
     el('div', { class: 'row' },
       el('button', { class: 'btn', onclick: () => close() }, 'Mégse'),
       el('button', { class: 'btn primary', onclick: async () => { if (await map.saveEditing()) { panel.classList.add('hidden'); hooks.onSaved?.(); } } }, 'Mentés'))));
@@ -70,6 +71,8 @@ function renderItemsTab(st, sel) {
       el('button', { class: 'btn small', title: 'Másolás (⌘/Ctrl+D)', onclick: () => map.duplicateSelected() }, 'Másolat'),
       el('button', { class: 'btn small', title: 'Előre', onclick: () => map.reorderSelected(1) }, 'Előre'),
       el('button', { class: 'btn small', title: 'Hátra', onclick: () => map.reorderSelected(-1) }, 'Hátra')));
+    box.append(el('label', {}, 'Link (megnyílik, ha valaki használja a tárgyat)', el('input', { type: 'text', value: it.url || '', placeholder: 'https://… (pl. YouTube, prezentáció)', maxlength: 500, oninput: (e) => { it.url = e.target.value.trim(); } })));
+    if (!def.hasLabel && !def.door) box.append(el('label', {}, 'Saját név (opcionális)', el('input', { type: 'text', value: it.label || '', placeholder: def.label, maxlength: 64, oninput: (e) => { it.label = e.target.value; } })));
     if (def.hasLabel) {
       box.append(el('label', {}, 'Szöveg', el('input', { type: 'text', value: it.label || '', maxlength: 64, oninput: (e) => { it.label = e.target.value; map.refreshEdit(); } })));
     }
@@ -88,7 +91,7 @@ function renderItemsTab(st, sel) {
       class: 'btn small', onclick: () => {
         if (confirm('Betöltöd a mintairodát? Ez lecseréli a szobákat és a bútorokat ebben a szerkesztésben (mentés előtt még visszavonható a Mégse gombbal).')) map.loadTemplate(sampleOffice());
       },
-    }, 'Mintairoda betöltése'),
+    }, 'Mintairoda betöltése (falakkal)'),
     el('button', { class: 'btn small danger', onclick: () => { if (confirm('Minden bútort törölsz?')) map.clearItems(); } }, 'Bútorok törlése')));
 }
 
@@ -109,6 +112,7 @@ function renderZonesTab(st, sel) {
       el('label', {}, 'Típus', kind),
       el('label', {}, 'Padló', floor),
       el('label', { class: 'inline' }, 'Szín: ', el('input', { type: 'color', value: z.color, oninput: (e) => { z.color = e.target.value; map.refreshEdit(); } })),
+      el('button', { class: 'btn small block', onclick: () => map.wallsAroundZone(), title: 'Falak a szoba köré, alul középen ajtóval' }, '🧱 Falak a szoba köré'),
       el('div', { class: 'row tight' },
         el('button', { class: 'btn small', onclick: () => map.duplicateSelected() }, 'Másolat'),
         el('button', { class: 'btn small danger', onclick: () => map.deleteSelected(), html: `${ICONS.trash}<span>Törlés</span>` }))));

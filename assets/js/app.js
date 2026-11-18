@@ -7,6 +7,8 @@ import * as media from './media.js';
 import * as map from './map.js';
 import * as chat from './chat.js';
 import * as ui from './ui.js';
+import * as ix from './interact.js';
+import { note as playNote } from './sfx.js';
 
 S.peerId = uid(20);
 
@@ -45,6 +47,8 @@ function applyMe(me) {
   S.world = me.world;
   S.zones = me.zones;
   S.items = me.items || [];
+  S.itemStates = me.itemStates || {};
+  S.stateVersion = me.stateVersion || 0;
   document.title = S.appName;
   if (me.lastPos) { S.local.x = me.lastPos.x; S.local.y = me.lastPos.y; }
   else {
@@ -138,12 +142,24 @@ async function enterOffice() {
     onRemoteGone: (peer) => removeRemoteMedia(peer.userId),
   });
 
+  ix.initInteract({
+    itemOp, setAct, setHold, broadcastState, setStatus, startCall, give,
+    sendTo: (id, msg) => pm.sendToUser(id, msg),
+    broadcastZone, broadcastAll: (msg) => pm.broadcast(msg),
+    emote: sendEmote,
+    openProfile: () => ui.openProfile(),
+  });
+  map.setDoorAccess(ix.doorAccess);
   map.initMap($('#map'), {
     onLocalMove,
     onMessage: (id) => chat.openConversation('d:' + id),
     onCall: startCall,
     onEndCall: endCall,
     onPoke: sendPoke,
+    onGive: give,
+    onItemClick: (it) => { if (S.local.pose) standUp(); ix.openItem(it); },
+    onBump: (it) => ix.onBump(it),
+    onStand: standUp,
     onEditSelect: (z) => ui.renderEditPanel(z),
   });
   chat.initChat($('#app'), {
@@ -155,14 +171,19 @@ async function enterOffice() {
   });
   ui.initUi({ barContainer: $('#app'), stageContainer: $('#stage-wrap'), mapContainer: $('#map') }, {
     toggleMic, toggleCam, toggleScreen, endCall, setStatus, logout,
+    holdMenu: () => ix.holdMenu(), emoteMenu: () => ix.emoteMenu(),
     restartMic, applySpeaker, applyLowRes,
     profileChanged: () => { broadcastState(); map.updateAvatar(S.me.id); ui.renderBar(); },
-    mapSaved: () => { S.local.zone = map.currentZoneId(); map.renderZones(); map.renderItems(); broadcastState(); refreshMedia(); emit('zone'); },
+    mapSaved: () => { refreshItemStates(); S.local.zone = map.currentZoneId(); map.renderZones(); map.renderItems(); broadcastState(); refreshMedia(); emit('zone'); },
   });
 
+  map.renderItems();
+  map.ensureFree();
   S.local.zone = map.currentZoneId();
+  map.rebuildNav();
   map.renderZones();
   map.renderAvatars();
+  map.updateNear();
 
   try {
     const h = await api('chat_history');
@@ -194,6 +215,7 @@ function publicState() {
     x: Math.round(S.local.x), y: Math.round(S.local.y), zone: S.local.zone, status: S.local.status,
     mic: S.local.mic, cam: S.local.cam, screen: S.local.screen, call: S.local.call,
     dir: S.local.dir || 'down', name: S.me.name, avatar: S.me.avatar,
+    pose: S.local.pose || null, seat: S.local.seat || null, act: S.local.act || null, hold: S.local.hold || null,
   };
 }
 
@@ -237,6 +259,7 @@ async function sync() {
     }
     if (res.messages.length) chat.addMessages(res.messages);
     if (res.mapVersion !== S.world.version && !map.isEditing()) reloadMap();
+    else if (res.stateVersion !== S.stateVersion) refreshItemStates();
   } catch (e) {
     if (e.status === 401) { stopAll(); return showLogin(); }
     // a régi (>30 mp) jelzéseket eldobjuk, a többit újraküldjük
@@ -284,9 +307,13 @@ function reloadMap() {
     S.world = me.world;
     S.zones = me.zones;
     S.items = me.items || [];
-    S.local.zone = map.currentZoneId();
-    map.renderZones();
+    S.itemStates = me.itemStates || {};
+    S.stateVersion = me.stateVersion || 0;
     map.renderItems();
+    map.ensureFree();
+    S.local.zone = map.currentZoneId();
+    map.rebuildNav();
+    map.renderZones();
     broadcastState();
     refreshMedia();
     emit('zone');
@@ -326,9 +353,12 @@ let lastPosSent = 0;
 let posTimer = null;
 
 function onLocalMove(final = false) {
+  // ha elindul, abbahagyja, amit csinált (gépelés, tánc, kávéfőzés...)
+  if (!final && S.local.act) { ix.cancelBusy(); setAct(null); }
   const z = map.currentZoneId();
   if (z !== S.local.zone) {
     S.local.zone = z;
+    map.rebuildNav();
     map.renderZones();
     broadcastState();
     refreshMedia();
@@ -414,6 +444,92 @@ function shortcuts(e) {
   if (e.target.closest?.('input, textarea, select') || document.querySelector('.overlay') || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === 'm' || e.key === 'M') { e.preventDefault(); toggleMic(); }
   else if (e.key === 'c' || e.key === 'C') { e.preventDefault(); chat.toggle(); }
+  else if ((e.key === 'e' || e.key === 'E') && !map.isEditing()) { e.preventDefault(); ix.emoteMenu(); }
+}
+
+// ======================================================================= tárgyak állapota, tevékenységek
+
+/** Művelet egy tárgyon a szerveren; az új állapotot mindenkinek elküldjük. */
+async function itemOp(uid, op, data = {}, { silent = false } = {}) {
+  const res = await api('item_op', { uid, op, ...data });
+  if (res.state) {
+    S.itemStates[uid] = res.state;
+    map.updateItem(uid);
+    ix.onStateChanged(uid);
+    if (op !== 'unlock_check') pm.broadcast({ t: 'istate', uid, state: res.state });
+  }
+  return res;
+}
+
+let statesLoading = false;
+async function refreshItemStates() {
+  if (statesLoading) return;
+  statesLoading = true;
+  try {
+    const res = await api('item_states');
+    const old = S.itemStates;
+    S.itemStates = res.states || {};
+    S.stateVersion = res.version;
+    for (const uidKey of new Set([...Object.keys(old), ...Object.keys(S.itemStates)])) {
+      if (JSON.stringify(old[uidKey]) !== JSON.stringify(S.itemStates[uidKey])) { map.updateItem(uidKey); ix.onStateChanged(uidKey); }
+    }
+  } catch { /* később újra */ }
+  statesLoading = false;
+}
+
+function setAct(act, sticky = false) {
+  if ((S.local.act || null) === (act || null)) return;
+  S.local.act = act || null;
+  S.local.actSticky = sticky;
+  map.updateAvatar(S.me.id);
+  broadcastState();
+}
+
+function setHold(item) {
+  S.local.hold = item || null;
+  map.updateAvatar(S.me.id);
+  broadcastState();
+  ui.renderBar();
+}
+
+function standUp() {
+  if (!S.local.pose) return;
+  map.standUp();
+  setAct(null);
+  broadcastState();
+}
+
+function broadcastZone(msg) {
+  for (const u of S.users.values()) {
+    if (u.online && u.zone != null && u.zone === S.local.zone) pm.sendToUser(u.id, msg);
+  }
+}
+
+function sendEmote(e) {
+  map.emote(S.me.id, e);
+  pm.broadcast({ t: 'emote', e });
+}
+
+let pendingGive = null;
+function give(userId) {
+  const u = S.users.get(userId);
+  if (!S.local.hold || !u) return;
+  if (!pm.sendToUser(userId, { t: 'give', item: S.local.hold })) return toast(`Nincs kapcsolat vele: ${u.name}.`);
+  pendingGive = { userId, item: S.local.hold };
+  toast(`${map.HOLD_EMOJI[S.local.hold]} Felajánlottad ${u.name} részére…`, { timeout: 3000 });
+}
+
+function receiveGive(fromId, item) {
+  if (!map.HOLD_EMOJI[item]) return;
+  const name = S.users.get(fromId)?.name || 'Valaki';
+  beep(880, 0.08);
+  toast(`${name} ad neked: ${map.HOLD_EMOJI[item]}`, {
+    timeout: 20000,
+    actions: [
+      { label: 'Köszi, nem', onClick: () => pm.sendToUser(fromId, { t: 'give_no' }) },
+      { label: 'Elfogadom', primary: true, onClick: () => { pm.sendToUser(fromId, { t: 'give_ok' }); setHold(item); sendEmote('🙏'); } },
+    ],
+  });
 }
 
 // ======================================================================= adatcsatorna üzenetek
@@ -428,6 +544,10 @@ function onPeerData(peer, msg) {
       if (typeof msg.name === 'string') u.name = msg.name.slice(0, 40);
       if (msg.avatar && typeof msg.avatar === 'object') u.avatar = msg.avatar;
       if (DIRS.includes(msg.dir)) u.dir = msg.dir;
+      u.pose = ['sit', 'lie', 'on'].includes(msg.pose) ? msg.pose : null;
+      u.seat = typeof msg.seat === 'string' ? msg.seat.slice(0, 16) : null;
+      u.act = typeof msg.act === 'string' ? msg.act.slice(0, 12) : null;
+      u.hold = typeof msg.hold === 'string' && map.HOLD_EMOJI[msg.hold] ? msg.hold : null;
       map.updateAvatar(u.id);
       if (prevKey !== [u.zone, u.status, u.call, u.cam, u.screen].join('|')) refreshMedia();
       emit('users');
@@ -448,6 +568,34 @@ function onPeerData(peer, msg) {
       break;
     case 'poke':
       receivePoke(peer.userId);
+      break;
+    case 'istate':
+      if (typeof msg.uid === 'string' && msg.state && typeof msg.state === 'object') {
+        S.itemStates[msg.uid] = msg.state;
+        map.updateItem(msg.uid);
+        ix.onStateChanged(msg.uid);
+      }
+      break;
+    case 'fx':
+      ix.onFx(peer.userId, msg);
+      break;
+    case 'emote':
+      if (typeof msg.e === 'string' && msg.e.length <= 8) map.emote(peer.userId, msg.e);
+      break;
+    case 'note':
+      if (u && audible(meAsUser(), u) || (u && u.zone != null && u.zone === S.local.zone)) playNote(Number(msg.f) || 440, msg.inst === 'guitar' ? 'guitar' : 'piano');
+      break;
+    case 'game':
+      ix.onGameMessage(peer.userId, msg);
+      break;
+    case 'give':
+      receiveGive(peer.userId, msg.item);
+      break;
+    case 'give_ok':
+      if (pendingGive && pendingGive.userId === peer.userId) { setHold(null); toast(`Odaadtad ${u?.name || ''} részére. 🎁`); pendingGive = null; }
+      break;
+    case 'give_no':
+      if (pendingGive && pendingGive.userId === peer.userId) { toast(`${u?.name || 'Ő'} most nem kér.`); pendingGive = null; }
       break;
     case 'chat':
       if (msg.m && msg.m.senderId === peer.userId) chat.addMessages([msg.m]);
@@ -704,7 +852,7 @@ function updateTitle() {
 }
 
 // Hibakereséshez a böngésző konzolából: __ng.S, __ng.pm
-window.__ng = { S, media, get pm() { return pm; }, walkTo: (x, y) => map.walkTo({ x, y }) };
+window.__ng = { S, media, map, ix, get pm() { return pm; }, walkTo: (x, y) => map.walkTo({ x, y }) };
 
 boot();
 export { ICONS };

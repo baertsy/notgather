@@ -109,15 +109,28 @@ export function toast(text, { type = 'info', timeout = 4000, actions = [] } = {}
 }
 
 // --- Modális ablak ---
-export function modal(title, content, { onClose, wide = false } = {}) {
-  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); onClose?.(); };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
-  const overlay = el('div', { class: 'overlay', onmousedown: (e) => { if (e.target === overlay) close(); } },
-    el('div', { class: `card modal ${wide ? 'wide' : ''}` },
-      el('div', { class: 'modal-head' }, el('h2', {}, title), el('button', { class: 'icon-btn', title: 'Bezárás', onclick: close, html: ICONS.close })),
-      content));
+export function modal(title, content, { onClose, wide = false, xl = false, fullscreen = false, head = [] } = {}) {
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    if (document.fullscreenElement && card.contains(document.fullscreenElement) || document.fullscreenElement === card) document.exitFullscreen().catch(() => {});
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+    onClose?.();
+  };
+  const onKey = (e) => { if (e.key === 'Escape' && !document.fullscreenElement) close(); };
+  const fsBtn = fullscreen ? el('button', {
+    class: 'icon-btn', title: 'Teljes képernyő', html: ICONS.expand,
+    onclick: () => { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else card.requestFullscreen?.().catch(() => {}); },
+  }) : null;
+  const card = el('div', { class: `card modal ${wide ? 'wide' : ''} ${xl ? 'xl' : ''}` },
+    el('div', { class: 'modal-head' }, el('h2', {}, title), el('div', { class: 'modal-tools' }, ...head, fsBtn, el('button', { class: 'icon-btn', title: 'Bezárás', onclick: close, html: ICONS.close }))),
+    content);
+  const overlay = el('div', { class: 'overlay', onmousedown: (e) => { if (e.target === overlay) close(); } }, card);
   document.body.append(overlay);
   document.addEventListener('keydown', onKey);
+  close.card = card;
   return close;
 }
 
@@ -154,5 +167,7 @@ export const ICONS = {
   expand: svg('<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>'),
   warn: svg('<path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"/>'),
   plus: svg('<path d="M12 5v14M5 12h14"/>'),
+  external: svg('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/>'),
+  smile: svg('<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/>'),
   trash: svg('<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>'),
 };

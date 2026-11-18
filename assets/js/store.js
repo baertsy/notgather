@@ -22,9 +22,11 @@ export const S = {
   world: { w: 1600, h: 1000, version: 1 },
   zones: [],
   items: [],         // bútorok
+  itemStates: {},    // tárgyak közös állapota uid szerint (ajtó, növény, jegyzet...)
+  stateVersion: 0,
 
   // A saját élő állapotom, amit a többiek látnak.
-  local: { x: 200, y: 200, zone: null, status: 'available', mic: true, cam: false, screen: false, call: null },
+  local: { x: 200, y: 200, zone: null, status: 'available', mic: true, cam: false, screen: false, call: null, dir: 'down', pose: null, seat: null, act: null, hold: null },
 
   // A többiek: userId -> { id, name, color, emoji, online, peerId, x, y, zone, status, mic, cam, screen, call }
   users: new Map(),

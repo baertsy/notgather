@@ -123,8 +123,15 @@ function accSide(a, c) {
 
 // ---------------------------------------------------------------- test
 
-function legs(cfg, side) {
+function legs(cfg, side, pose, dir) {
   const p = cfg.pants, s = '#1f2937';
+  if (pose === 'sit') {
+    // ülve: a comb előre néz, csak a térd és a cipő látszik
+    if (dir === 'up') return '';
+    if (side) return `<rect x="7" y="30" width="11" height="4.6" rx="2" fill="${p}" ${OL}/><rect x="6.5" y="30" width="4.6" height="8" rx="1.8" fill="${p}" ${OL}/><rect x="4.6" y="36.4" width="6" height="3" rx="1.4" fill="${s}"/>`;
+    return `<rect x="10.6" y="30" width="4.4" height="6" rx="1.6" fill="${p}" ${OL}/><rect x="17" y="30" width="4.4" height="6" rx="1.6" fill="${p}" ${OL}/>`
+      + `<rect x="10.2" y="35" width="5.2" height="3" rx="1.4" fill="${s}"/><rect x="16.6" y="35" width="5.2" height="3" rx="1.4" fill="${s}"/>`;
+  }
   if (side) {
     return `<g class="lg-a"><rect x="15.5" y="31" width="4.2" height="8.5" rx="1.6" fill="${shade(p, -0.2)}"/><rect x="13.6" y="38.4" width="6" height="3" rx="1.4" fill="${s}"/></g>`
       + `<g class="lg-b"><rect x="12.4" y="31" width="4.2" height="8.5" rx="1.6" fill="${p}" ${OL}/><rect x="10.4" y="38.4" width="6" height="3" rx="1.4" fill="${s}"/></g>`;
@@ -157,7 +164,7 @@ export function avatarSVG(cfg, dir = 'down', o = {}) {
   let inner = '';
   if (!o.head) inner += `<ellipse class="av-shadow" cx="16" cy="41" rx="9" ry="2.4" fill="rgba(0,0,0,.35)"/>`;
   let fig = '';
-  if (!o.head) fig += legs(cfg, side) + torso(cfg, side);
+  if (!o.head) fig += legs(cfg, side, o.pose, dir) + torso(cfg, side);
   if (dir === 'down') {
     if (cfg.hair === 'long' || cfg.hair === 'bob') fig += `<path d="${cfg.hair === 'long' ? 'M7 26V12H25V26Z' : 'M7 19V12H25V19Z'}" fill="${shade(cfg.hairColor, -0.2)}"/>`;
     fig += `<circle cx="7.2" cy="14.5" r="1.7" fill="${sk}" ${OL}/><circle cx="24.8" cy="14.5" r="1.7" fill="${sk}" ${OL}/>`

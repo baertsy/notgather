@@ -42,6 +42,13 @@ try {
         case 'password':
             action_password();
             break;
+        case 'item_states':
+            ng_require_user();
+            ng_json(['states' => ng_item_states(), 'version' => (int)ng_setting('state_version', '0')]);
+            break;
+        case 'item_op':
+            action_item_op();
+            break;
         case 'map_save':
             action_map_save();
             break;
@@ -111,6 +118,8 @@ function action_me(): void
         'world' => ng_world(),
         'zones' => ng_zones(),
         'items' => ng_items(),
+        'itemStates' => ng_item_states(),
+        'stateVersion' => (int)ng_setting('state_version', '0'),
         'lastPos' => $pos ? ['x' => (int)$pos['x'], 'y' => (int)$pos['y']] : null,
     ]);
 }
@@ -235,6 +244,7 @@ function action_sync(): void
         'signals' => $signals,
         'messages' => $messages,
         'mapVersion' => (int)ng_setting('map_version', '1'),
+        'stateVersion' => (int)ng_setting('state_version', '0'),
     ]);
 }
 
@@ -368,13 +378,24 @@ function action_map_save(): void
             $pdo->exec('DELETE FROM ng_items');
         }
         $items = $hasItems ? array_slice($b['items'], 0, 3000) : [];
-        $insItem = $pdo->prepare('INSERT INTO ng_items (type, x, y, w, h, rot, color, label) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+        $insItem = $pdo->prepare('INSERT INTO ng_items (uid, type, x, y, w, h, rot, color, label, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $seenUids = [];
         foreach ($items as $it) {
             if (!is_array($it) || !preg_match('/^[a-z0-9_]{1,32}$/', (string)($it['type'] ?? ''))) {
                 continue;
             }
             $color = (string)($it['color'] ?? '');
+            $uid = (string)($it['uid'] ?? '');
+            if (!preg_match('/^[a-z0-9]{6,16}$/', $uid) || isset($seenUids[$uid])) {
+                $uid = ng_new_uid();
+            }
+            $seenUids[$uid] = true;
+            $url = trim((string)($it['url'] ?? ''));
+            if ($url !== '' && !preg_match('#^https?://#i', $url)) {
+                $url = 'https://' . $url;
+            }
             $insItem->execute([
+                $uid,
                 $it['type'],
                 max(-200, min($w + 200, (int)($it['x'] ?? 0))),
                 max(-200, min($h + 200, (int)($it['y'] ?? 0))),
@@ -383,7 +404,12 @@ function action_map_save(): void
                 in_array((int)($it['rot'] ?? 0), [0, 90, 180, 270], true) ? (int)$it['rot'] : 0,
                 preg_match('/^#[0-9a-fA-F]{6}$/', $color) ? strtolower($color) : '',
                 ng_str($it['label'] ?? '', 64),
+                substr($url, 0, 500),
             ]);
+        }
+        // a törölt tárgyak állapota is törlődik
+        if ($hasItems) {
+            $pdo->exec('DELETE FROM ng_item_state WHERE uid NOT IN (SELECT uid FROM ng_items)');
         }
         ng_set_setting('world_w', (string)$w);
         ng_set_setting('world_h', (string)$h);
@@ -394,6 +420,188 @@ function action_map_save(): void
         throw $e;
     }
     ng_json(['ok' => true, 'world' => ng_world(), 'zones' => ng_zones(), 'items' => ng_items()]);
+}
+
+/**
+ * Műveletek a tárgyak közös állapotán (ajtó, növény, jegyzetek, lámpa...).
+ * A válasz a tárgy új, nyilvános állapota.
+ */
+function action_item_op(): void
+{
+    $u = ng_require_user();
+    $b = ng_body();
+    $uid = (string)($b['uid'] ?? '');
+    $op = (string)($b['op'] ?? '');
+    $pdo = db();
+    $q = $pdo->prepare('SELECT type FROM ng_items WHERE uid = ?');
+    $q->execute([$uid]);
+    $type = $q->fetchColumn();
+    if ($type === false) {
+        ng_fail('no_item', 404);
+    }
+    $doorOps = ['door', 'lock', 'unlock_check', 'unlock'];
+    $doors = ['door', 'double_door', 'glass_door'];
+    $plants = ['plant', 'big_plant', 'cactus', 'flowers', 'flower_bed', 'bonsai', 'hanging_plant', 'monstera'];
+    $pets = ['aquarium', 'cat', 'dog'];
+    if ((in_array($op, $doorOps, true) && !in_array($type, $doors, true))
+        || ($op === 'water' && !in_array($type, $plants, true))
+        || ($op === 'feed' && !in_array($type, $pets, true))) {
+        ng_fail('bad_op');
+    }
+    $now = time();
+    $st = ng_get_state($uid);
+    $extra = [];
+    $keyOk = function ($k) {
+        return is_string($k) && preg_match('/^[a-zA-Z][a-zA-Z0-9_]{0,23}$/', $k) && !in_array($k, ['pw', 'locked', 'lockZone', 'lockId', 'lockedBy', 'm', 't', 'fedAt'], true);
+    };
+
+    switch ($op) {
+        case 'set':
+            $patch = is_array($b['patch'] ?? null) ? $b['patch'] : [];
+            foreach ($patch as $k => $v) {
+                if (!$keyOk($k)) {
+                    continue;
+                }
+                if ($v === null) {
+                    unset($st[$k]);
+                } else {
+                    $st[$k] = $v;
+                }
+            }
+            break;
+
+        case 'list_add':
+            $key = $b['key'] ?? '';
+            if (!$keyOk($key)) {
+                ng_fail('bad_key');
+            }
+            $val = $b['value'] ?? null;
+            if (strlen((string)json_encode($val)) > 30000) {
+                ng_fail('too_large');
+            }
+            $max = max(1, min(800, (int)($b['max'] ?? 100)));
+            $list = is_array($st[$key] ?? null) ? $st[$key] : [];
+            $entry = ['id' => substr(bin2hex(random_bytes(6)), 0, 10), 'by' => $u['name'], 'byId' => $u['id'], 'at' => $now, 'v' => $val];
+            $list[] = $entry;
+            if (count($list) > $max) {
+                $list = array_slice($list, -$max);
+            }
+            $st[$key] = $list;
+            $extra['entry'] = $entry;
+            break;
+
+        case 'list_remove':
+            $key = $b['key'] ?? '';
+            if (!$keyOk($key)) {
+                ng_fail('bad_key');
+            }
+            $id = (string)($b['id'] ?? '');
+            $st[$key] = array_values(array_filter(is_array($st[$key] ?? null) ? $st[$key] : [], function ($e) use ($id) {
+                return ($e['id'] ?? '') !== $id;
+            }));
+            break;
+
+        case 'list_clear':
+            $key = $b['key'] ?? '';
+            if (!$keyOk($key)) {
+                ng_fail('bad_key');
+            }
+            $st[$key] = [];
+            break;
+
+        // ---- ajtó
+        case 'door':
+            if (!empty($st['locked'])) {
+                ng_fail('locked', 423);
+            }
+            $st['open'] = !empty($b['open']);
+            break;
+
+        case 'lock':
+            $pw = (string)($b['password'] ?? '');
+            if ($pw === '' || strlen($pw) > 64) {
+                ng_fail('bad_password');
+            }
+            if (!empty($st['locked'])) {
+                ng_fail('already_locked', 409);
+            }
+            // A kliens küldi, melyik szobában van (a jelenlét csak pár másodpercenként frissül).
+            if (isset($b['zone']) && is_numeric($b['zone'])) {
+                $zone = (int)$b['zone'];
+            } else {
+                $z = $pdo->prepare('SELECT zone_id FROM ng_presence WHERE user_id = ?');
+                $z->execute([$u['id']]);
+                $zone = $z->fetchColumn();
+            }
+            $st['locked'] = true;
+            $st['open'] = false;
+            $st['pw'] = password_hash($pw, PASSWORD_DEFAULT);
+            $st['lockZone'] = ($zone === false || $zone === null) ? null : (int)$zone;
+            $st['lockedBy'] = $u['name'];
+            $st['lockId'] = substr(bin2hex(random_bytes(6)), 0, 10);
+            break;
+
+        case 'unlock_check':
+            // Kívülről érkezők: a jelszóval "kulcsot" kapnak, a zár marad.
+            if (empty($st['locked'])) {
+                ng_json(['ok' => true, 'state' => ng_public_state($st)]);
+            }
+            if (!password_verify((string)($b['password'] ?? ''), (string)($st['pw'] ?? ''))) {
+                usleep(600000);
+                ng_fail('wrong_password', 403);
+            }
+            ng_json(['ok' => true, 'lockId' => $st['lockId'], 'state' => ng_public_state($st)]);
+            break;
+
+        case 'unlock':
+            if (empty($st['locked'])) {
+                break;
+            }
+            if (isset($b['zone']) && is_numeric($b['zone'])) {
+                $zone = (int)$b['zone'];
+            } else {
+                $z = $pdo->prepare('SELECT zone_id FROM ng_presence WHERE user_id = ?');
+                $z->execute([$u['id']]);
+                $zone = $z->fetchColumn();
+            }
+            $inside = $zone !== false && $zone !== null && isset($st['lockZone']) && (int)$zone === (int)$st['lockZone'];
+            // a térképért felelősök vészhelyzetben jelszó nélkül is feloldhatják (pl. elfelejtett jelszó)
+            if (!empty($u['perms']['map'])) {
+                $inside = true;
+            }
+            if (!$inside && !password_verify((string)($b['password'] ?? ''), (string)($st['pw'] ?? ''))) {
+                usleep(600000);
+                ng_fail('wrong_password', 403);
+            }
+            unset($st['pw'], $st['lockZone'], $st['lockedBy'], $st['lockId']);
+            $st['locked'] = false;
+            break;
+
+        // ---- növény locsolása
+        case 'water':
+            $m = ng_plant_moisture($st, $now);
+            $st['m'] = min(170.0, $m + 35.0);
+            $st['t'] = $now;
+            $st['wateredBy'] = $u['name'];
+            $st['wateredAt'] = $now;
+            break;
+
+        // ---- etetés (akvárium, macska, kutya)
+        case 'feed':
+            $last = (int)($st['fedAt'] ?? 0);
+            if ($now - $last < 3600) {
+                $extra['alreadyFed'] = true;
+            } else {
+                $st['fedAt'] = $now;
+                $st['fedBy'] = $u['name'];
+            }
+            break;
+
+        default:
+            ng_fail('bad_op');
+    }
+    ng_put_state($uid, $st);
+    ng_json(array_merge(['ok' => true, 'state' => ng_public_state($st)], $extra));
 }
 
 function action_users_list(): void

@@ -7,6 +7,7 @@ import * as map from './map.js';
 import * as chat from './chat.js';
 import * as editor from './editor.js';
 import { AVATAR_OPTIONS, avatarSVG, defaultAvatar } from './avatar.js';
+import { HOLD_EMOJI } from './map.js';
 
 let hooks = {};
 let bar, stage;
@@ -56,7 +57,7 @@ export function renderBar() {
   const unread = chat.totalUnread();
   const perms = S.me.perms || {};
   // Csak akkor rajzoljuk újra, ha tényleg változott valami (különben pl. a nyitott menü bezárulna).
-  const key = JSON.stringify([loc, micBroken, unread, S.local.mic, S.local.cam, S.local.screen, S.local.call, S.local.status, chat.isOpen(), map.isEditing(), perms]);
+  const key = JSON.stringify([loc, micBroken, unread, S.local.mic, S.local.cam, S.local.screen, S.local.call, S.local.status, chat.isOpen(), map.isEditing(), perms, S.local.hold]);
   if (key === barKey) return;
   barKey = key;
   bar.innerHTML = '';
@@ -74,6 +75,8 @@ export function renderBar() {
       el('button', { class: `round ${S.local.cam ? 'on' : ''}`, title: S.local.cam ? 'Kamera ki' : 'Kamera be', onclick: () => hooks.toggleCam(), html: S.local.cam ? ICONS.cam : ICONS.camOff }),
       el('button', { class: `round ${S.local.screen ? 'on' : ''}`, title: S.local.screen ? 'Képernyőmegosztás leállítása' : 'Képernyőmegosztás', onclick: () => hooks.toggleScreen(), html: ICONS.screen }),
       S.local.call ? el('button', { class: 'round danger', title: 'Hívás vége', onclick: () => hooks.endCall(), html: ICONS.phoneOff }) : null,
+      el('button', { class: 'round', title: 'Integetés, taps, tánc… (E)', onclick: () => hooks.emoteMenu(), html: ICONS.smile }),
+      S.local.hold ? el('button', { class: 'round hold-btn', title: 'Ami a kezedben van', onclick: () => hooks.holdMenu() }, HOLD_EMOJI[S.local.hold] || '🎁') : null,
       statusSelect()),
     el('div', { class: 'bar-right' },
       el('button', { class: `icon-btn ${chat.isOpen() ? 'active' : ''}`, title: 'Chat (C)', onclick: () => chat.toggle(), html: ICONS.chat },
@@ -154,7 +157,7 @@ function layoutFocus() {
 
 // ---------------------------------------------------------------- profil és avatar
 
-function openProfile() {
+export function openProfile() {
   const av = { ...defaultAvatar(), ...(S.me.avatar || {}) };
   const nameIn = el('input', { type: 'text', value: S.me.name, maxlength: 40 });
   const preview = el('div', { class: 'av-preview' });

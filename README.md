@@ -11,15 +11,26 @@ Fut sima osztott tárhelyen (PHP + MySQL), nem kell hozzá npm, Node, build vagy
 - **Kamera és képernyőmegosztás** a szobán vagy a híváson belül. A képernyőmegosztás automatikusan nagyban jelenik meg.
 - **Chat:** közös csatorna, szobánkénti csatorna és privát üzenetek, előzményekkel és olvasatlan-jelzéssel. Háttérben lévő fülön asztali értesítést küld.
 - **Állapot:** Elérhető / Elfoglalt (szobában sem hallanak) / Távol.
+- **Élet az irodában:** több mint 100 tárgy, és szinte mindegyikkel lehet csinálni valamit. Menj oda és nyomd meg az **X**-et, vagy kattints a tárgyra (az avatar odasétál):
+  - székre, kanapéra, padra leülni, függőágyba, nyugágyba lefeküdni;
+  - laptopon gépelni (közös jegyzet), táblára rajzolni, cetlit felragasztani, névtelen ötletet bedobni;
+  - kávét, teát főzni, pirítóst, popcornt, kolbászt sütni; hűtőből, automatából, gyümölcstálból venni. A kézben lévő dolgot meg lehet enni-inni, vagy oda lehet adni egy kollégának;
+  - növényt locsolni: a növény szomjas, haldoklik vagy túl van locsolva, és ez a térképen is látszik;
+  - ablakon kinézni: napszaktól függő tájkép madárcsicsergéssel, szellővel, kérésre esővel. Kandallónál melegedni, akváriumot nézni és etetni, macskát, kutyát simogatni;
+  - pingpongozni, csocsózni kettesben vagy a gép ellen, snake-et játszani, dartsozni ranglistával, zongorázni, gitározni (a szobában lévők hallják);
+  - bulit indítani a diszkógömbbel, táncolni (**E** menü), gongot ütni, konfettit lőni, lufit durrantani, gyertyát elfújni;
+  - ajtót nyitni, csukni, **jelszóval bezárni**: kívülről csak a jelszóval lehet bejutni, bentről bárki kimehet;
+  - bármelyik tárgyhoz **link** rendelhető (pl. TV-hez YouTube, vetítővászonhoz prezentáció). Ablakban nyílik meg, teljes képernyőre tehető, vagy új lapon megnyitható.
+- **Falak és ütközés:** a falakon és a bútorokon nem lehet átmenni. Kattintásra az avatar kikerüli az akadályokat, és az ajtókon át megy (a csukott ajtót magától kinyitja).
 - **Rajzolt avatarok** négy irányból, lépésanimációval. Állítható a bőrszín, a frizura, a hajszín, a felső, a nadrág és a kiegészítő (szemüveg, napszemüveg, fejhallgató, sapka).
 - **Mozgás Gather-módra:** csak fel/le/jobbra/balra (nyilak vagy WASD). Kattintásra L alakú úton megy oda.
 - **Bökés:** kattints egy kollégára → Bökés. Hangjelzést és értesítést kap, az avatarja megrázkódik. Akkor is eljut hozzá, ha nincs közvetlen kapcsolat.
 - **Profil:** név, avatar, jelszócsere.
-- **Térkép- és berendezésszerkesztő:** szobák (név, típus, szín, padló: parketta, szőnyegpadló, csempe, beton, fű) és közel 40 féle bútor: asztalok, székek, laptop, monitor, szekrények, polcok, kanapé, fotel, szőnyeg, konyha, növények, képek, falak, ajtók, ablakok, feliratok. Forgatás, átméretezés, színezés, másolás. Egy kattintással betölthető mintairoda.
+- **Térkép- és berendezésszerkesztő:** szobák (név, típus, szín, padló: parketta, szőnyegpadló, csempe, beton, fű, „falak a szoba köré” gomb) és több mint 100 féle tárgy: asztalok, székek, laptop, monitor, szekrények, polcok, kanapé, fotel, szőnyeg, konyha, növények, képek, falak, ajtók, ablakok, feliratok. Forgatás, átméretezés, színezés, másolás. Egy kattintással betölthető egy mintairoda: egymás melletti szobák közös falakkal, folyosóval, ajtókkal, ablakokkal és boltívekkel.
 - **Külön jogosultságok:** „térkép szerkesztése” és „felhasználók kezelése” külön adható.
 - **Erős zajszűrés (RNNoise):** a mikrofon hangját a saját gépen szűri, mielőtt elküldené. Kikapcsolható, vagy választható helyette a böngésző alap szűrője.
 - **Takarékos mód:** kikapcsolja az animációkat, kevesebb gépterheléssel (beállítások).
-- Billentyűk: nyilak vagy WASD a mozgáshoz, **M** a némításhoz, **C** a chathez. A szerkesztőben: **R** forgatás, **Del** törlés, **⌘/Ctrl+D** másolás, nyilak finom mozgatás.
+- Billentyűk: nyilak vagy WASD a mozgáshoz, **X** a közeli tárgy használata, **E** integetés, taps, tánc, **M** a némításhoz, **C** a chathez. A szerkesztőben: **R** forgatás, **Del** törlés, **⌘/Ctrl+D** másolás, nyilak finom mozgatás.
 
 ## Hogyan működik (és miért nem fagy)
 
@@ -48,6 +59,11 @@ PHP 7.4 vagy újabb kell (PDO MySQL bővítménnyel), ez minden mai tárhelyen a
 - Tipp egész napos használathoz: Chrome-ban a ⋮ menü › „Mentés és megosztás” › „Parancsikon létrehozása…” › „Megnyitás ablakként”. Így az iroda saját ablakban fut, és nem vész el a fülek között.
 - Fejhallgatóval a legjobb a hangminőség.
 
+## Zárt ajtók
+
+- Bezáráskor jelszót kell megadni. A zár az ajtó melletti szobát védi: aki bent van, szabadon kimehet; aki kívülről jön, annak a nekimenéskor megjelenő ablakban kell megadnia a jelszót.
+- Elfelejtett jelszó esetén a térképszerkesztési joggal rendelkezők jelszó nélkül is feloldhatják a zárat.
+
 ## Ha valakit nem hallasz
 
 Ha egy kolléga avatarján sárga figyelmeztető jel van, vele nem jött létre közvetlen kapcsolat. Otthoni neteknél ez ritka. Mobilnetes hotspotnál, céges VPN-nél vagy szigorú routernél előfordulhat.
@@ -62,7 +78,8 @@ install.php             egyszeri telepítő (telepítés után törlendő)
 api/index.php           az összes szerveroldali művelet
 api/config.php          beállítások (ezt te hozod létre)
 api/inc/                belső fájlok (böngészőből nem elérhetők)
-assets/js/              kliens: app, rtc (WebRTC), map, editor, avatar, furniture, chat, ui, media, store, util
+assets/js/              kliens: app, rtc (WebRTC), map, nav (ütközés, útkeresés), interact (tárgyak),
+                        games, scenes, sfx (hangok), editor, template (mintairoda), avatar, furniture, chat, ui, media, store, util
 assets/vendor/rnnoise/  zajszűrő (MIT licenc, a forrás a SOURCE.txt-ben)
 assets/css/app.css      megjelenés
 ```

@@ -256,18 +256,91 @@ function ng_migrate(): void
             label VARCHAR(64) NOT NULL DEFAULT \'\'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
         ng_set_setting('schema', '2');
+        $ver = 2;
     }
+    if ($ver < 3) {
+        $icols = $pdo->query('SHOW COLUMNS FROM ng_items')->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('uid', $icols, true)) {
+            $pdo->exec("ALTER TABLE ng_items ADD uid VARCHAR(16) NOT NULL DEFAULT '', ADD url VARCHAR(500) NOT NULL DEFAULT ''");
+        }
+        $ids = $pdo->query("SELECT id FROM ng_items WHERE uid = ''")->fetchAll(PDO::FETCH_COLUMN);
+        $upd = $pdo->prepare('UPDATE ng_items SET uid = ? WHERE id = ?');
+        foreach ($ids as $id) {
+            $upd->execute([ng_new_uid(), $id]);
+        }
+        $pdo->exec('CREATE TABLE IF NOT EXISTS ng_item_state (
+            uid VARCHAR(16) NOT NULL PRIMARY KEY,
+            state MEDIUMTEXT NOT NULL,
+            updated_at INT UNSIGNED NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        ng_set_setting('schema', '3');
+    }
+}
+
+function ng_new_uid(): string
+{
+    return substr(bin2hex(random_bytes(8)), 0, 12);
 }
 
 function ng_items(): array
 {
-    $rows = db()->query('SELECT type, x, y, w, h, rot, color, label FROM ng_items ORDER BY id')->fetchAll();
+    $rows = db()->query('SELECT uid, type, x, y, w, h, rot, color, label, url FROM ng_items ORDER BY id')->fetchAll();
     foreach ($rows as &$r) {
         foreach (['x', 'y', 'w', 'h', 'rot'] as $k) {
             $r[$k] = (int)$r[$k];
         }
     }
     return $rows;
+}
+
+// ---------------------------------------------------------------- tárgyak közös állapota
+
+// A titkos mezők (pl. az ajtó jelszavának hash-e) soha nem mennek ki a kliensnek.
+function ng_public_state(array $st): array
+{
+    unset($st['pw']);
+    return $st;
+}
+
+function ng_item_states(): array
+{
+    $out = [];
+    foreach (db()->query('SELECT uid, state FROM ng_item_state')->fetchAll() as $r) {
+        $st = json_decode($r['state'], true);
+        if (is_array($st)) {
+            $out[$r['uid']] = ng_public_state($st);
+        }
+    }
+    return $out;
+}
+
+function ng_get_state(string $uid): array
+{
+    $st = db()->prepare('SELECT state FROM ng_item_state WHERE uid = ?');
+    $st->execute([$uid]);
+    $v = json_decode((string)$st->fetchColumn(), true);
+    return is_array($v) ? $v : [];
+}
+
+function ng_put_state(string $uid, array $state): void
+{
+    $json = json_encode($state, JSON_UNESCAPED_UNICODE);
+    if ($json === false || strlen($json) > 400000) {
+        ng_fail('state_too_large');
+    }
+    db()->prepare('INSERT INTO ng_item_state (uid, state, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE state = VALUES(state), updated_at = VALUES(updated_at)')
+        ->execute([$uid, $json, time()]);
+    ng_set_setting('state_version', (string)((int)ng_setting('state_version', '0') + 1));
+}
+
+// Növény nedvessége: naponta kb. 30 egységet veszít, egy locsolás 35-öt ad.
+const NG_PLANT_DECAY_PER_DAY = 30.0;
+
+function ng_plant_moisture(array $st, int $now): float
+{
+    $m = isset($st['m']) ? (float)$st['m'] : 80.0;
+    $t = isset($st['t']) ? (int)$st['t'] : $now;
+    return max(0.0, $m - NG_PLANT_DECAY_PER_DAY * max(0, $now - $t) / 86400);
 }
 
 function ng_setting(string $k, string $default = ''): string
