@@ -98,6 +98,7 @@ function action_logout(): void
 
 function action_me(): void
 {
+    ng_migrate();
     $u = ng_require_user();
     $cfg = ng_config();
     $st = db()->prepare('SELECT x, y FROM ng_presence WHERE user_id = ?');
@@ -109,6 +110,7 @@ function action_me(): void
         'iceServers' => $cfg['ice_servers'] ?? [],
         'world' => ng_world(),
         'zones' => ng_zones(),
+        'items' => ng_items(),
         'lastPos' => $pos ? ['x' => (int)$pos['x'], 'y' => (int)$pos['y']] : null,
     ]);
 }
@@ -190,7 +192,7 @@ function action_sync(): void
 
     // Mindenki állapota (kis csapat, ezért egyszerűen mindenkit visszaadunk)
     $rows = $pdo->query(
-        'SELECT u.id, u.display_name, u.color, u.emoji, p.peer_id, p.x, p.y, p.zone_id, p.status,
+        'SELECT u.id, u.display_name, u.color, u.avatar, p.peer_id, p.x, p.y, p.zone_id, p.status,
                 p.mic, p.cam, p.screen, p.call_with, p.last_seen
          FROM ng_users u LEFT JOIN ng_presence p ON p.user_id = u.id ORDER BY u.display_name'
     )->fetchAll();
@@ -201,7 +203,7 @@ function action_sync(): void
             'id' => (int)$r['id'],
             'name' => $r['display_name'],
             'color' => $r['color'],
-            'emoji' => $r['emoji'],
+            'avatar' => ng_avatar_decode($r['avatar']),
             'online' => $online,
             'peerId' => $online ? $r['peer_id'] : null,
             'x' => (int)$r['x'],
@@ -293,10 +295,11 @@ function action_profile(): void
     if ($name === '') {
         ng_fail('name_required');
     }
-    $emoji = ng_str($b['emoji'] ?? '', 4);
-    db()->prepare('UPDATE ng_users SET display_name = ?, color = ?, emoji = ? WHERE id = ?')
-        ->execute([$name, ng_color($b['color'] ?? ''), $emoji, $u['id']]);
-    ng_json(['ok' => true, 'user' => ['name' => $name, 'color' => ng_color($b['color'] ?? ''), 'emoji' => $emoji]]);
+    $avatar = ng_avatar_clean($b['avatar'] ?? null);
+    $color = $avatar['shirt'];
+    db()->prepare('UPDATE ng_users SET display_name = ?, color = ?, avatar = ? WHERE id = ?')
+        ->execute([$name, $color, json_encode($avatar), $u['id']]);
+    ng_json(['ok' => true, 'user' => ['name' => $name, 'color' => $color, 'avatar' => $avatar]]);
 }
 
 function action_password(): void
@@ -319,7 +322,7 @@ function action_password(): void
 
 function action_map_save(): void
 {
-    ng_require_admin();
+    ng_require_perm('map');
     $b = ng_body();
     $w = max(600, min(6000, (int)($b['world']['w'] ?? 1600)));
     $h = max(400, min(6000, (int)($b['world']['h'] ?? 1000)));
@@ -328,8 +331,8 @@ function action_map_save(): void
     $pdo->beginTransaction();
     try {
         $keep = [];
-        $upd = $pdo->prepare('UPDATE ng_zones SET name = ?, kind = ?, x = ?, y = ?, w = ?, h = ?, color = ? WHERE id = ?');
-        $ins = $pdo->prepare('INSERT INTO ng_zones (name, kind, x, y, w, h, color) VALUES (?, ?, ?, ?, ?, ?, ?)');
+        $upd = $pdo->prepare('UPDATE ng_zones SET name = ?, kind = ?, x = ?, y = ?, w = ?, h = ?, color = ?, floor = ? WHERE id = ?');
+        $ins = $pdo->prepare('INSERT INTO ng_zones (name, kind, x, y, w, h, color, floor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
         foreach ($zones as $z) {
             if (!is_array($z)) {
                 continue;
@@ -343,6 +346,7 @@ function action_map_save(): void
                 max(40, min($w, (int)($z['w'] ?? 200))),
                 max(40, min($h, (int)($z['h'] ?? 150))),
                 ng_color($z['color'] ?? ''),
+                in_array($z['floor'] ?? '', ['none', 'wood', 'carpet', 'tile', 'grass', 'concrete'], true) ? $z['floor'] : 'none',
             ];
             $id = (int)($z['id'] ?? 0);
             if ($id > 0) {
@@ -358,6 +362,29 @@ function action_map_save(): void
         } else {
             $pdo->exec('DELETE FROM ng_zones');
         }
+        // Bútorok: ha a kérés tartalmazza, lecseréljük az egészet (ha nem, maradnak).
+        $hasItems = is_array($b['items'] ?? null);
+        if ($hasItems) {
+            $pdo->exec('DELETE FROM ng_items');
+        }
+        $items = $hasItems ? array_slice($b['items'], 0, 3000) : [];
+        $insItem = $pdo->prepare('INSERT INTO ng_items (type, x, y, w, h, rot, color, label) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+        foreach ($items as $it) {
+            if (!is_array($it) || !preg_match('/^[a-z0-9_]{1,32}$/', (string)($it['type'] ?? ''))) {
+                continue;
+            }
+            $color = (string)($it['color'] ?? '');
+            $insItem->execute([
+                $it['type'],
+                max(-200, min($w + 200, (int)($it['x'] ?? 0))),
+                max(-200, min($h + 200, (int)($it['y'] ?? 0))),
+                max(4, min(2000, (int)($it['w'] ?? 40))),
+                max(4, min(2000, (int)($it['h'] ?? 40))),
+                in_array((int)($it['rot'] ?? 0), [0, 90, 180, 270], true) ? (int)$it['rot'] : 0,
+                preg_match('/^#[0-9a-fA-F]{6}$/', $color) ? strtolower($color) : '',
+                ng_str($it['label'] ?? '', 64),
+            ]);
+        }
         ng_set_setting('world_w', (string)$w);
         ng_set_setting('world_h', (string)$h);
         ng_set_setting('map_version', (string)((int)ng_setting('map_version', '1') + 1));
@@ -366,27 +393,29 @@ function action_map_save(): void
         $pdo->rollBack();
         throw $e;
     }
-    ng_json(['ok' => true, 'world' => ng_world(), 'zones' => ng_zones()]);
+    ng_json(['ok' => true, 'world' => ng_world(), 'zones' => ng_zones(), 'items' => ng_items()]);
 }
 
 function action_users_list(): void
 {
-    ng_require_admin();
-    $rows = db()->query('SELECT id, username, display_name, is_admin FROM ng_users ORDER BY display_name')->fetchAll();
+    ng_require_perm('users');
+    $rows = db()->query('SELECT id, username, display_name, perm_map, perm_users FROM ng_users ORDER BY display_name')->fetchAll();
     ng_json(['users' => array_map(function ($r) {
-        return ['id' => (int)$r['id'], 'username' => $r['username'], 'name' => $r['display_name'], 'isAdmin' => (bool)$r['is_admin']];
+        return ['id' => (int)$r['id'], 'username' => $r['username'], 'name' => $r['display_name'],
+            'perms' => ['map' => (bool)$r['perm_map'], 'users' => (bool)$r['perm_users']]];
     }, $rows)]);
 }
 
 function action_user_save(): void
 {
-    $me = ng_require_admin();
+    $me = ng_require_perm('users');
     $b = ng_body();
     $id = (int)($b['id'] ?? 0);
     $username = strtolower(ng_str($b['username'] ?? '', 64));
     $name = ng_str($b['name'] ?? '', 40);
     $password = is_string($b['password'] ?? null) ? $b['password'] : '';
-    $isAdmin = empty($b['isAdmin']) ? 0 : 1;
+    $permMap = empty($b['perms']['map']) ? 0 : 1;
+    $permUsers = empty($b['perms']['users']) ? 0 : 1;
     if (!preg_match('/^[a-z0-9._-]{2,64}$/', $username)) {
         ng_fail('bad_username');
     }
@@ -401,10 +430,10 @@ function action_user_save(): void
     }
     if ($id > 0) {
         if ($id === $me['id']) {
-            $isAdmin = 1; // saját magát nem fokozhatja le
+            $permUsers = 1; // a saját felhasználókezelési jogát nem veheti el
         }
-        $pdo->prepare('UPDATE ng_users SET username = ?, display_name = ?, is_admin = ? WHERE id = ?')
-            ->execute([$username, $name, $isAdmin, $id]);
+        $pdo->prepare('UPDATE ng_users SET username = ?, display_name = ?, perm_map = ?, perm_users = ?, is_admin = ? WHERE id = ?')
+            ->execute([$username, $name, $permMap, $permUsers, ($permMap || $permUsers) ? 1 : 0, $id]);
         if ($password !== '') {
             if (strlen($password) < 6) {
                 ng_fail('password_too_short');
@@ -417,15 +446,19 @@ function action_user_save(): void
             ng_fail('password_too_short');
         }
         $colors = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#3b82f6', '#8b5cf6', '#ec4899'];
-        $pdo->prepare('INSERT INTO ng_users (username, pass_hash, display_name, color, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-            ->execute([$username, password_hash($password, PASSWORD_DEFAULT), $name, $colors[array_rand($colors)], $isAdmin, time()]);
+        $avatar = ng_avatar_default();
+        $avatar['shirt'] = $colors[array_rand($colors)];
+        $avatar['skin'] = NG_AVATAR_OPTIONS['skin'][array_rand(NG_AVATAR_OPTIONS['skin'])];
+        $avatar['hair'] = ['short', 'long', 'bun', 'curly', 'spiky', 'ponytail', 'bob'][mt_rand(0, 6)];
+        $pdo->prepare('INSERT INTO ng_users (username, pass_hash, display_name, color, avatar, perm_map, perm_users, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            ->execute([$username, password_hash($password, PASSWORD_DEFAULT), $name, $avatar['shirt'], json_encode($avatar), $permMap, $permUsers, ($permMap || $permUsers) ? 1 : 0, time()]);
     }
     ng_json(['ok' => true]);
 }
 
 function action_user_delete(): void
 {
-    $me = ng_require_admin();
+    $me = ng_require_perm('users');
     $id = (int)(ng_body()['id'] ?? 0);
     if ($id <= 0 || $id === $me['id']) {
         ng_fail('cannot_delete');

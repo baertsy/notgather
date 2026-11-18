@@ -1,0 +1,1 @@
+web-noise-suppressor 0.4.1 (MIT) – https://github.com/sapphi-red/web-noise-suppressor; RNNoise (BSD) – xiph/rnnoise

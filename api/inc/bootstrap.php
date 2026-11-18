@@ -134,7 +134,7 @@ function ng_current_user(): ?array
         return null;
     }
     $st = db()->prepare(
-        'SELECT u.id, u.username, u.display_name, u.color, u.emoji, u.is_admin, t.expires_at
+        'SELECT u.id, u.username, u.display_name, u.color, u.emoji, u.avatar, u.perm_map, u.perm_users, t.expires_at
          FROM ng_tokens t JOIN ng_users u ON u.id = t.user_id
          WHERE t.token_hash = ?'
     );
@@ -156,7 +156,8 @@ function ng_current_user(): ?array
         'name' => $row['display_name'],
         'color' => $row['color'],
         'emoji' => $row['emoji'],
-        'isAdmin' => (bool)$row['is_admin'],
+        'avatar' => ng_avatar_decode($row['avatar']),
+        'perms' => ['map' => (bool)$row['perm_map'], 'users' => (bool)$row['perm_users']],
     ];
     return $user;
 }
@@ -170,13 +171,103 @@ function ng_require_user(): array
     return $u;
 }
 
-function ng_require_admin(): array
+// Jogosultság ellenőrzése: 'map' (térkép szerkesztése) vagy 'users' (felhasználók kezelése).
+function ng_require_perm(string $perm): array
 {
     $u = ng_require_user();
-    if (!$u['isAdmin']) {
+    if (empty($u['perms'][$perm])) {
         ng_fail('forbidden', 403);
     }
     return $u;
+}
+
+// ---------------------------------------------------------------- avatar
+
+const NG_AVATAR_OPTIONS = [
+    'skin' => ['#f8d7b5', '#f1c27d', '#e0ac69', '#c68642', '#8d5524', '#5c3a21'],
+    'hair' => ['short', 'long', 'bun', 'curly', 'spiky', 'ponytail', 'bob', 'bald'],
+    'acc' => ['none', 'glasses', 'sunglasses', 'headphones', 'cap'],
+];
+
+function ng_avatar_default(): array
+{
+    return ['skin' => '#f1c27d', 'hair' => 'short', 'hairColor' => '#3b2416', 'shirt' => '#3b82f6', 'pants' => '#334155', 'acc' => 'none', 'accColor' => '#ef4444'];
+}
+
+function ng_avatar_clean($a): array
+{
+    $d = ng_avatar_default();
+    if (!is_array($a)) {
+        return $d;
+    }
+    $out = [];
+    foreach ($d as $k => $def) {
+        $v = $a[$k] ?? $def;
+        if (isset(NG_AVATAR_OPTIONS[$k])) {
+            $out[$k] = in_array($v, NG_AVATAR_OPTIONS[$k], true) ? $v : $def;
+        } elseif (in_array($k, ['skin'], true)) {
+            $out[$k] = $def;
+        } else {
+            $out[$k] = is_string($v) && preg_match('/^#[0-9a-fA-F]{6}$/', $v) ? strtolower($v) : $def;
+        }
+    }
+    return $out;
+}
+
+function ng_avatar_decode($json): array
+{
+    if (!is_string($json) || $json === '') {
+        return ng_avatar_default();
+    }
+    return ng_avatar_clean(json_decode($json, true));
+}
+
+// ---------------------------------------------------------------- adatbázis-frissítések
+
+/**
+ * Automatikus adatbázis-frissítés. Minden oldalbetöltéskor egy olcsó ellenőrzés;
+ * ha a séma régebbi, egyszer lefutnak a hiányzó lépések. Így frissítéskor elég
+ * a fájlokat feltölteni, nem kell újra telepíteni.
+ */
+function ng_migrate(): void
+{
+    $pdo = db();
+    $ver = (int)ng_setting('schema', '1');
+    if ($ver < 2) {
+        $cols = $pdo->query('SHOW COLUMNS FROM ng_users')->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('perm_map', $cols, true)) {
+            $pdo->exec('ALTER TABLE ng_users ADD perm_map TINYINT(1) NOT NULL DEFAULT 0, ADD perm_users TINYINT(1) NOT NULL DEFAULT 0');
+            $pdo->exec('UPDATE ng_users SET perm_map = is_admin, perm_users = is_admin');
+        }
+        if (!in_array('avatar', $cols, true)) {
+            $pdo->exec('ALTER TABLE ng_users ADD avatar TEXT NULL');
+        }
+        $zcols = $pdo->query('SHOW COLUMNS FROM ng_zones')->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('floor', $zcols, true)) {
+            $pdo->exec("ALTER TABLE ng_zones ADD floor VARCHAR(16) NOT NULL DEFAULT 'none'");
+        }
+        $pdo->exec('CREATE TABLE IF NOT EXISTS ng_items (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            type VARCHAR(32) NOT NULL,
+            x SMALLINT NOT NULL, y SMALLINT NOT NULL,
+            w SMALLINT NOT NULL, h SMALLINT NOT NULL,
+            rot SMALLINT NOT NULL DEFAULT 0,
+            color VARCHAR(16) NOT NULL DEFAULT \'\',
+            label VARCHAR(64) NOT NULL DEFAULT \'\'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        ng_set_setting('schema', '2');
+    }
+}
+
+function ng_items(): array
+{
+    $rows = db()->query('SELECT type, x, y, w, h, rot, color, label FROM ng_items ORDER BY id')->fetchAll();
+    foreach ($rows as &$r) {
+        foreach (['x', 'y', 'w', 'h', 'rot'] as $k) {
+            $r[$k] = (int)$r[$k];
+        }
+    }
+    return $rows;
 }
 
 function ng_setting(string $k, string $default = ''): string
@@ -195,7 +286,7 @@ function ng_set_setting(string $k, string $v): void
 
 function ng_zones(): array
 {
-    $rows = db()->query('SELECT id, name, kind, x, y, w, h, color FROM ng_zones ORDER BY id')->fetchAll();
+    $rows = db()->query('SELECT id, name, kind, x, y, w, h, color, floor FROM ng_zones ORDER BY id')->fetchAll();
     foreach ($rows as &$r) {
         foreach (['id', 'x', 'y', 'w', 'h'] as $k) {
             $r[$k] = (int)$r[$k];

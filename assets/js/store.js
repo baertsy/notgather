@@ -21,6 +21,7 @@ export const S = {
   iceServers: [],
   world: { w: 1600, h: 1000, version: 1 },
   zones: [],
+  items: [],         // bútorok
 
   // A saját élő állapotom, amit a többiek látnak.
   local: { x: 200, y: 200, zone: null, status: 'available', mic: true, cam: false, screen: false, call: null },

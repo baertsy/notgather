@@ -1,13 +1,15 @@
 // Vezérlősáv, videósáv és a beállító ablakok.
 
 import { S, on, zoneById, audible, meAsUser } from './store.js';
-import { el, api, modal, toast, ICONS, initials } from './util.js';
+import { el, api, modal, toast, ICONS } from './util.js';
 import * as media from './media.js';
 import * as map from './map.js';
 import * as chat from './chat.js';
+import * as editor from './editor.js';
+import { AVATAR_OPTIONS, avatarSVG, defaultAvatar } from './avatar.js';
 
 let hooks = {};
-let bar, stage, editPanel;
+let bar, stage;
 
 export function initUi({ barContainer, stageContainer, mapContainer }, h) {
   hooks = h;
@@ -15,14 +17,20 @@ export function initUi({ barContainer, stageContainer, mapContainer }, h) {
   barContainer.append(bar);
   stage = el('div', { class: 'stage hidden' });
   stageContainer.append(stage);
-  editPanel = el('div', { class: 'edit-panel card hidden' });
-  mapContainer.append(editPanel);
+  editor.initEditor(mapContainer, {
+    onSaved: () => { hooks.mapSaved(); renderBar(); },
+    onClose: () => renderBar(),
+  });
   renderBar();
   on('unread', renderBar);
   on('zone', renderBar);
   on('users', renderBar);
   on('local', renderBar);
   on('chatOpen', renderBar);
+}
+
+export function renderEditPanel(sel) {
+  editor.render(sel);
 }
 
 // ---------------------------------------------------------------- vezérlősáv
@@ -46,8 +54,9 @@ export function renderBar() {
   const loc = locationInfo();
   const micBroken = !media.local.micTrack;
   const unread = chat.totalUnread();
+  const perms = S.me.perms || {};
   // Csak akkor rajzoljuk újra, ha tényleg változott valami (különben pl. a nyitott menü bezárulna).
-  const key = JSON.stringify([loc, micBroken, unread, S.local.mic, S.local.cam, S.local.screen, S.local.call, S.local.status, chat.isOpen(), map.isEditing(), S.me.isAdmin]);
+  const key = JSON.stringify([loc, micBroken, unread, S.local.mic, S.local.cam, S.local.screen, S.local.call, S.local.status, chat.isOpen(), map.isEditing(), perms]);
   if (key === barKey) return;
   barKey = key;
   bar.innerHTML = '';
@@ -69,10 +78,10 @@ export function renderBar() {
     el('div', { class: 'bar-right' },
       el('button', { class: `icon-btn ${chat.isOpen() ? 'active' : ''}`, title: 'Chat (C)', onclick: () => chat.toggle(), html: ICONS.chat },
         unread ? el('span', { class: 'badge' }, unread > 99 ? '99+' : unread) : null),
-      el('button', { class: 'icon-btn', title: 'Profil', onclick: openProfile, html: ICONS.user }),
-      el('button', { class: 'icon-btn', title: 'Hang és kép beállítások', onclick: openSettings, html: ICONS.settings }),
-      S.me.isAdmin ? el('button', { class: `icon-btn ${map.isEditing() ? 'active' : ''}`, title: 'Térkép szerkesztése', onclick: toggleEditor, html: ICONS.map }) : null,
-      S.me.isAdmin ? el('button', { class: 'icon-btn', title: 'Felhasználók', onclick: openUsers, html: ICONS.users }) : null,
+      el('button', { class: 'icon-btn', title: 'Profil és avatar', onclick: openProfile, html: ICONS.user }),
+      el('button', { class: 'icon-btn', title: 'Beállítások', onclick: openSettings, html: ICONS.settings }),
+      perms.map ? el('button', { class: `icon-btn ${map.isEditing() ? 'active' : ''}`, title: 'Térkép és berendezés szerkesztése', onclick: toggleEditor, html: ICONS.map }) : null,
+      perms.users ? el('button', { class: 'icon-btn', title: 'Felhasználók', onclick: openUsers, html: ICONS.users }) : null,
       el('button', { class: 'icon-btn', title: 'Kilépés', onclick: () => hooks.logout(), html: ICONS.logout })));
 }
 
@@ -83,6 +92,12 @@ function statusSelect() {
     el('option', { value: 'away' }, '🟡 Távol'));
   sel.value = S.local.status;
   return sel;
+}
+
+function toggleEditor() {
+  if (map.isEditing()) editor.close();
+  else editor.open();
+  renderBar();
 }
 
 // ---------------------------------------------------------------- videósáv
@@ -137,35 +152,48 @@ function layoutFocus() {
   for (const [k, t] of tiles) t.node.classList.toggle('focused', k === focused);
 }
 
-// ---------------------------------------------------------------- profil
-
-const PALETTE = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#06b6d4', '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899', '#64748b', '#a16207'];
+// ---------------------------------------------------------------- profil és avatar
 
 function openProfile() {
-  let color = S.me.color;
-  const nameIn = el('input', { value: S.me.name, maxlength: 40 });
-  const emojiIn = el('input', { value: S.me.emoji || '', maxlength: 4, placeholder: 'pl. 😎 (üresen a monogram látszik)' });
+  const av = { ...defaultAvatar(), ...(S.me.avatar || {}) };
+  const nameIn = el('input', { type: 'text', value: S.me.name, maxlength: 40 });
   const preview = el('div', { class: 'av-preview' });
-  const paint = () => { preview.style.background = color; preview.textContent = emojiIn.value.trim() || initials(nameIn.value); };
-  nameIn.addEventListener('input', paint);
-  emojiIn.addEventListener('input', paint);
-  const swatches = el('div', { class: 'swatches' }, PALETTE.map((c) => el('button', {
-    class: 'swatch', type: 'button', style: { background: c }, title: c,
-    onclick: () => { color = c; picker.value = c; paint(); },
-  })));
-  const picker = el('input', { type: 'color', value: color, oninput: (e) => { color = e.target.value; paint(); } });
+  let dirIdx = 0;
+  const dirs = ['down', 'left', 'up', 'right'];
+  const paint = () => {
+    preview.innerHTML = dirs.map((d, i) => `<div class="pv ${i === dirIdx ? 'big' : ''}">${avatarSVG(av, d)}</div>`).join('');
+  };
+  const swatchRow = (colors, key) => el('div', { class: 'swatches' }, colors.map((c) => el('button', {
+    class: `swatch ${av[key] === c ? 'active' : ''}`, type: 'button', style: { background: c }, title: c,
+    onclick: (e) => { av[key] = c; e.currentTarget.parentNode.querySelectorAll('.swatch').forEach((s) => s.classList.remove('active')); e.currentTarget.classList.add('active'); paint(); },
+  })), el('input', { type: 'color', value: av[key], title: 'Egyéni szín', oninput: (e) => { av[key] = e.target.value; paint(); } }));
+  const optRow = (opts, key) => el('div', { class: 'chips' }, opts.map(([v, l]) => el('button', {
+    class: `chip ${av[key] === v ? 'active' : ''}`, type: 'button',
+    onclick: (e) => { av[key] = v; e.currentTarget.parentNode.querySelectorAll('.chip').forEach((s) => s.classList.remove('active')); e.currentTarget.classList.add('active'); paint(); },
+  }, l)));
   paint();
+  preview.addEventListener('click', () => { dirIdx = (dirIdx + 1) % 4; paint(); });
 
   const oldPw = el('input', { type: 'password', autocomplete: 'current-password' });
   const newPw = el('input', { type: 'password', autocomplete: 'new-password', minlength: 6 });
 
-  const close = modal('Profil', el('div', { class: 'form' },
-    el('div', { class: 'profile-top' }, preview, el('div', { class: 'grow' }, el('label', {}, 'Megjelenített név', nameIn), el('label', {}, 'Emoji az avataron', emojiIn))),
-    el('label', {}, 'Szín'), swatches, el('label', { class: 'inline' }, 'Egyéni szín: ', picker),
+  const close = modal('Profil és avatar', el('div', { class: 'form' },
+    preview,
+    el('label', {}, 'Megjelenített név', nameIn),
+    el('label', {}, 'Bőrszín'), el('div', { class: 'swatches' }, AVATAR_OPTIONS.skin.map((c) => el('button', {
+      class: `swatch ${av.skin === c ? 'active' : ''}`, type: 'button', style: { background: c },
+      onclick: (e) => { av.skin = c; e.currentTarget.parentNode.querySelectorAll('.swatch').forEach((s) => s.classList.remove('active')); e.currentTarget.classList.add('active'); paint(); },
+    }))),
+    el('label', {}, 'Frizura'), optRow(AVATAR_OPTIONS.hair, 'hair'),
+    el('label', {}, 'Hajszín'), swatchRow(AVATAR_OPTIONS.hairColors, 'hairColor'),
+    el('label', {}, 'Felső'), swatchRow(AVATAR_OPTIONS.clothColors, 'shirt'),
+    el('label', {}, 'Nadrág'), swatchRow(AVATAR_OPTIONS.clothColors, 'pants'),
+    el('label', {}, 'Kiegészítő'), optRow(AVATAR_OPTIONS.acc, 'acc'),
+    el('label', {}, 'Kiegészítő színe (sapka, fejhallgató)'), swatchRow(AVATAR_OPTIONS.clothColors, 'accColor'),
     el('button', {
       class: 'btn primary', onclick: async () => {
         try {
-          const res = await api('profile', { name: nameIn.value, emoji: emojiIn.value, color });
+          const res = await api('profile', { name: nameIn.value, avatar: av });
           Object.assign(S.me, res.user);
           hooks.profileChanged();
           close();
@@ -186,10 +214,10 @@ function openProfile() {
           toast(e.code === 'invalid_password' ? 'Hibás jelenlegi jelszó.' : e.code === 'password_too_short' ? 'Az új jelszó túl rövid.' : 'Hiba: ' + e.code, { type: 'error' });
         }
       },
-    }, 'Jelszó módosítása')));
+    }, 'Jelszó módosítása')), { wide: true });
 }
 
-// ---------------------------------------------------------------- hang/kép beállítások
+// ---------------------------------------------------------------- beállítások
 
 async function openSettings() {
   const devs = await media.listDevices();
@@ -202,28 +230,42 @@ async function openSettings() {
   const micSel = mkSelect(devs.mics, p.micId, 'Alapértelmezett mikrofon');
   const spkSel = mkSelect(devs.speakers, p.speakerId, 'Alapértelmezett hangszóró');
   const camSel = mkSelect(devs.cams, p.camId, 'Alapértelmezett kamera');
-  const ns = el('input', { type: 'checkbox' }); ns.checked = p.noiseSuppression;
+  const noise = el('select', {},
+    el('option', { value: 'rnnoise' }, 'Erős (RNNoise) – ajánlott'),
+    el('option', { value: 'browser' }, 'Alap (a böngésző beépített szűrője)'),
+    el('option', { value: 'off' }, 'Kikapcsolva'));
+  noise.value = p.noise;
   const ec = el('input', { type: 'checkbox' }); ec.checked = p.echoCancellation;
   const ag = el('input', { type: 'checkbox' }); ag.checked = p.autoGain;
+  const low = el('input', { type: 'checkbox' }); low.checked = p.lowRes;
   const meterBar = el('div', { class: 'meter-fill' });
   let meter = null;
   if (media.local.micStream) { try { meter = new media.LevelMeter(media.local.micStream); } catch { /* */ } }
   const iv = setInterval(() => { if (meter) meterBar.style.width = Math.min(100, meter.level() * 400) + '%'; }, 80);
-  const close = modal('Hang és kép', el('div', { class: 'form' },
+  const noiseInfo = media.local.noiseError
+    ? el('p', { class: 'err small' }, 'Az erős zajszűrés nem indult el ezen a gépen, ezért a böngésző alap szűrője működik.')
+    : media.local.noiseActive ? el('p', { class: 'ok small' }, 'Az erős zajszűrés működik.') : null;
+  const close = modal('Beállítások', el('div', { class: 'form' },
+    el('h4', {}, 'Hang'),
     el('label', {}, 'Mikrofon', micSel),
     el('div', { class: 'meter' }, meterBar),
     el('label', {}, 'Hangszóró / fejhallgató', spkSel),
     typeof HTMLMediaElement.prototype.setSinkId !== 'function' ? el('p', { class: 'muted-text' }, 'Ez a böngésző nem támogatja a kimenet választását.') : null,
-    el('label', {}, 'Kamera', camSel),
-    el('label', { class: 'check' }, ns, 'Zajszűrés (háttérzaj, billentyűzet)'),
+    el('label', {}, 'Zajszűrés (háttérzaj, billentyűzet, ventilátor)', noise),
+    noiseInfo,
     el('label', { class: 'check' }, ec, 'Visszhangszűrés (hangszóró használatakor fontos)'),
     el('label', { class: 'check' }, ag, 'Automatikus hangerő'),
+    el('h4', {}, 'Kép'),
+    el('label', {}, 'Kamera', camSel),
+    el('h4', {}, 'Megjelenés'),
+    el('label', { class: 'check' }, low, 'Takarékos mód: nincsenek animációk, kevesebb gépterhelés (gyengébb gépre, akkuról)'),
     el('p', { class: 'muted-text' }, 'Tipp: fejhallgatóval a legjobb a hangminőség.'),
     el('button', {
       class: 'btn primary', onclick: async () => {
-        const micChanged = micSel.value !== p.micId || ns.checked !== p.noiseSuppression || ec.checked !== p.echoCancellation || ag.checked !== p.autoGain;
-        Object.assign(p, { micId: micSel.value, speakerId: spkSel.value, camId: camSel.value, noiseSuppression: ns.checked, echoCancellation: ec.checked, autoGain: ag.checked });
+        const micChanged = micSel.value !== p.micId || noise.value !== p.noise || ec.checked !== p.echoCancellation || ag.checked !== p.autoGain;
+        Object.assign(p, { micId: micSel.value, speakerId: spkSel.value, camId: camSel.value, noise: noise.value, echoCancellation: ec.checked, autoGain: ag.checked, lowRes: low.checked });
         media.savePrefs();
+        hooks.applyLowRes();
         close();
         if (micChanged) await hooks.restartMic();
         hooks.applySpeaker();
@@ -231,7 +273,7 @@ async function openSettings() {
     }, 'Mentés')), { onClose: () => { clearInterval(iv); meter?.dispose(); } });
 }
 
-// ---------------------------------------------------------------- felhasználók (admin)
+// ---------------------------------------------------------------- felhasználók
 
 async function openUsers() {
   const box = el('div', { class: 'form' });
@@ -240,9 +282,10 @@ async function openUsers() {
     let users = [];
     try { users = (await api('users_list')).users; } catch (e) { toast('Hiba: ' + e.code, { type: 'error' }); return; }
     box.innerHTML = '';
-    const table = el('table', { class: 'table' }, el('tr', {}, el('th', {}, 'Név'), el('th', {}, 'Felhasználónév'), el('th', {}, 'Admin'), el('th', {})));
+    const table = el('table', { class: 'table' }, el('tr', {}, el('th', {}, 'Név'), el('th', {}, 'Felhasználónév'), el('th', {}, 'Jogok'), el('th', {})));
     for (const u of users) {
-      table.append(el('tr', {}, el('td', {}, u.name), el('td', {}, u.username), el('td', {}, u.isAdmin ? 'igen' : ''),
+      const perms = [u.perms.map ? 'térkép' : null, u.perms.users ? 'felhasználók' : null].filter(Boolean).join(', ');
+      table.append(el('tr', {}, el('td', {}, u.name), el('td', {}, u.username), el('td', { class: 'muted-text' }, perms || '–'),
         el('td', { class: 'right' },
           el('button', { class: 'btn small', onclick: () => editUser(u) }, 'Szerkesztés'),
           u.id !== S.me.id ? el('button', {
@@ -255,19 +298,25 @@ async function openUsers() {
     box.append(table, el('button', { class: 'btn primary', onclick: () => editUser(null), html: `${ICONS.plus}<span>Új felhasználó</span>` }));
   };
   const editUser = (u) => {
-    const un = el('input', { value: u?.username || '', placeholder: 'pl. anna', autocomplete: 'off' });
-    const nm = el('input', { value: u?.name || '', placeholder: 'pl. Kovács Anna' });
+    const un = el('input', { type: 'text', value: u?.username || '', placeholder: 'pl. anna', autocomplete: 'off' });
+    const nm = el('input', { type: 'text', value: u?.name || '', placeholder: 'pl. Kovács Anna' });
     const pw = el('input', { type: 'password', autocomplete: 'new-password', placeholder: u ? 'üresen hagyva nem változik' : 'legalább 6 karakter' });
-    const ad = el('input', { type: 'checkbox' }); ad.checked = !!u?.isAdmin;
+    const pMap = el('input', { type: 'checkbox' }); pMap.checked = !!u?.perms?.map;
+    const pUsers = el('input', { type: 'checkbox' }); pUsers.checked = !!u?.perms?.users;
+    const self = u && u.id === S.me.id;
+    if (self) pUsers.disabled = true;
     const c2 = modal(u ? 'Felhasználó szerkesztése' : 'Új felhasználó', el('div', { class: 'form' },
       el('label', {}, 'Felhasználónév (belépéshez)', un),
       el('label', {}, 'Megjelenített név', nm),
       el('label', {}, 'Jelszó', pw),
-      el('label', { class: 'check' }, ad, 'Admin (térképet és felhasználókat kezelhet)'),
+      el('h4', {}, 'Jogosultságok'),
+      el('label', { class: 'check' }, pMap, 'Térkép és berendezés szerkesztése'),
+      el('label', { class: 'check' }, pUsers, 'Felhasználók kezelése' + (self ? ' (a sajátodat nem veheted el)' : '')),
       el('button', {
         class: 'btn primary', onclick: async () => {
           try {
-            await api('user_save', { id: u?.id || 0, username: un.value, name: nm.value, password: pw.value, isAdmin: ad.checked });
+            await api('user_save', { id: u?.id || 0, username: un.value, name: nm.value, password: pw.value, perms: { map: pMap.checked, users: pUsers.checked || self } });
+            if (self) { S.me.perms = { map: pMap.checked, users: true }; barKey = ''; renderBar(); }
             c2();
             load();
           } catch (e) {
@@ -279,42 +328,4 @@ async function openUsers() {
   };
   load();
   return close;
-}
-
-// ---------------------------------------------------------------- térképszerkesztő panel
-
-function toggleEditor() {
-  if (map.isEditing()) { map.stopEditing(); editPanel.classList.add('hidden'); }
-  else { map.startEditing(); renderEditPanel(null); editPanel.classList.remove('hidden'); }
-  renderBar();
-}
-
-export function renderEditPanel(zone) {
-  const st = map.editState();
-  if (!st) return;
-  editPanel.innerHTML = '';
-  const wIn = el('input', { type: 'number', value: st.world.w, min: 600, max: 6000, step: 50 });
-  const hIn = el('input', { type: 'number', value: st.world.h, min: 400, max: 6000, step: 50 });
-  const sizeChange = () => map.setWorldSize(Number(wIn.value), Number(hIn.value));
-  wIn.addEventListener('change', sizeChange);
-  hIn.addEventListener('change', sizeChange);
-  editPanel.append(el('h3', {}, 'Térkép szerkesztése'),
-    el('p', { class: 'muted-text' }, 'Húzd a szobákat a mozgatáshoz, a jobb alsó sarkukat az átméretezéshez.'),
-    el('button', { class: 'btn block', onclick: () => map.addZone(), html: `${ICONS.plus}<span>Új szoba</span>` }));
-  if (zone) {
-    const name = el('input', { value: zone.name, maxlength: 64, oninput: (e) => { zone.name = e.target.value; map.renderZones(); } });
-    const kind = el('select', { onchange: (e) => { zone.kind = e.target.value; map.renderZones(); } },
-      el('option', { value: 'talk' }, 'Beszélgetős (a bent lévők hallják egymást)'),
-      el('option', { value: 'quiet' }, 'Csendes (senki nem hall senkit)'));
-    kind.value = zone.kind;
-    const color = el('input', { type: 'color', value: zone.color, oninput: (e) => { zone.color = e.target.value; map.renderZones(); } });
-    editPanel.append(el('div', { class: 'form' },
-      el('h4', {}, 'Kijelölt szoba'),
-      el('label', {}, 'Név', name), el('label', {}, 'Típus', kind), el('label', { class: 'inline' }, 'Szín: ', color),
-      el('button', { class: 'btn danger block', onclick: () => map.deleteSelectedZone(), html: `${ICONS.trash}<span>Szoba törlése</span>` })));
-  }
-  editPanel.append(el('div', { class: 'form' }, el('h4', {}, 'Térkép mérete'), el('div', { class: 'row' }, el('label', {}, 'Szélesség', wIn), el('label', {}, 'Magasság', hIn))),
-    el('div', { class: 'row' },
-      el('button', { class: 'btn', onclick: () => { map.stopEditing(); editPanel.classList.add('hidden'); renderBar(); } }, 'Mégse'),
-      el('button', { class: 'btn primary', onclick: async () => { if (await map.saveEditing()) { editPanel.classList.add('hidden'); hooks.mapSaved(); renderBar(); } } }, 'Mentés')));
 }
