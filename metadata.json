@@ -1,9 +1,0 @@
-{
-  "name": "Virtual Office Space",
-  "description": "An interactive, web-based, multi-user virtual office prototype similar to Gather.town. Users can customize avatars, move around a 2D map with meeting rooms and open spaces, and interact via simulated video calls, room-specific chats, a whisper feature, and a shared whiteboard.",
-  "requestFramePermissions": [
-    "camera",
-    "microphone",
-    "display-capture"
-  ]
-}

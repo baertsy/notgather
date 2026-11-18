@@ -1,36 +1,55 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Virtual Office Space</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://aistudiocdn.com/react-toastify@11.0.5/dist/ReactToastify.css" />
-    <style>
-      html, body, #root {
-        height: 100%;
-        overflow: hidden;
-      }
-      body {
-        overscroll-behavior: none;
-      }
-    </style>
-  <script type="importmap">
-{
-  "imports": {
-    "react": "https://aistudiocdn.com/react@^19.2.0",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
-    "react/": "https://aistudiocdn.com/react@^19.2.0/",
-    "react-toastify/": "https://aistudiocdn.com/react-toastify@^11.0.5/",
-    "react-toastify": "https://aistudiocdn.com/react-toastify@^11.0.5"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NotGather</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏢</text></svg>">
+  <link rel="stylesheet" href="assets/css/app.css?v=1">
 </head>
-  <body class="bg-gray-800 text-white">
-    <div id="root"></div>
-    <script type="module" src="/index.tsx"></script>
-  </body>
+<body>
+  <!-- Belépés -->
+  <section id="login" class="screen hidden">
+    <div class="card auth-card">
+      <div class="logo">🏢</div>
+      <h1>Virtuális iroda</h1>
+      <form id="login-form" class="form" autocomplete="on">
+        <label>Felhasználónév<input name="username" required autocomplete="username" autocapitalize="none"></label>
+        <label>Jelszó<input name="password" type="password" required autocomplete="current-password"></label>
+        <button class="btn primary" type="submit">Belépés</button>
+        <p id="login-error" class="err"></p>
+      </form>
+    </div>
+  </section>
+
+  <!-- Már belépett, csak egy kattintás kell a hanghoz -->
+  <section id="enter" class="screen hidden">
+    <div class="card auth-card">
+      <div class="logo">🏢</div>
+      <h1>Szia, <span id="enter-name"></span>!</h1>
+      <p class="muted-text">A böngésző csak egy kattintás után engedi a hangot, ezért ezt a gombot kell megnyomni.</p>
+      <button id="enter-btn" class="btn primary big">Belépek az irodába</button>
+      <button id="enter-logout" class="btn link">Kijelentkezés</button>
+    </div>
+  </section>
+
+  <!-- Hiba / kiléptetés -->
+  <section id="fatal" class="screen hidden">
+    <div class="card auth-card">
+      <div class="logo">⚠️</div>
+      <p id="fatal-text"></p>
+      <button id="fatal-retry" class="btn primary hidden">Újrapróbálás</button>
+    </div>
+  </section>
+
+  <!-- Az iroda -->
+  <section id="app" class="screen hidden">
+    <div id="stage-wrap"></div>
+    <main id="map"></main>
+    <div id="audio-sink" hidden></div>
+  </section>
+
+  <noscript>Az irodához JavaScript szükséges.</noscript>
+  <script type="module" src="assets/js/app.js?v=1"></script>
+</body>
 </html>

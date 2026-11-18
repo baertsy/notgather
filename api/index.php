@@ -1,0 +1,438 @@
+<?php
+// Egyetlen belépési pont az összes API híváshoz: api/?a=<művelet>
+
+declare(strict_types=1);
+require __DIR__ . '/inc/bootstrap.php';
+
+$action = isset($_GET['a']) && is_string($_GET['a']) ? $_GET['a'] : '';
+$isPost = ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST';
+
+// A "leave" sendBeacon-nel érkezik, ami nem tud egyedi fejlécet küldeni.
+// Ártalmatlan művelet (csak offline-nak jelöl), ezért kivétel.
+if ($isPost && $action !== 'leave') {
+    ng_require_csrf();
+}
+
+try {
+    switch ($action) {
+        case 'login':
+            action_login();
+            break;
+        case 'logout':
+            action_logout();
+            break;
+        case 'me':
+            action_me();
+            break;
+        case 'sync':
+            action_sync();
+            break;
+        case 'leave':
+            action_leave();
+            break;
+        case 'chat_send':
+            action_chat_send();
+            break;
+        case 'chat_history':
+            action_chat_history();
+            break;
+        case 'profile':
+            action_profile();
+            break;
+        case 'password':
+            action_password();
+            break;
+        case 'map_save':
+            action_map_save();
+            break;
+        case 'users_list':
+            action_users_list();
+            break;
+        case 'user_save':
+            action_user_save();
+            break;
+        case 'user_delete':
+            action_user_delete();
+            break;
+        default:
+            ng_fail('unknown_action', 404);
+    }
+} catch (Throwable $e) {
+    error_log('[notgather] ' . $action . ': ' . $e->getMessage());
+    ng_fail('server_error', 500);
+}
+
+// ---------------------------------------------------------------------------
+
+function action_login(): void
+{
+    $b = ng_body();
+    $username = ng_str($b['username'] ?? '', 64);
+    $password = is_string($b['password'] ?? null) ? $b['password'] : '';
+    $st = db()->prepare('SELECT id, pass_hash FROM ng_users WHERE username = ?');
+    $st->execute([$username]);
+    $row = $st->fetch();
+    if (!$row || !password_verify($password, $row['pass_hash'])) {
+        usleep(700000); // lassítja a jelszópróbálgatást
+        ng_fail('invalid_login', 401);
+    }
+    // régi, lejárt tokenek takarítása
+    db()->prepare('DELETE FROM ng_tokens WHERE expires_at < ?')->execute([time()]);
+    ng_issue_token((int)$row['id']);
+    ng_json(['ok' => true]);
+}
+
+function action_logout(): void
+{
+    $token = $_COOKIE[NG_COOKIE] ?? '';
+    if (is_string($token) && $token !== '') {
+        db()->prepare('DELETE FROM ng_tokens WHERE token_hash = ?')->execute([hash('sha256', $token)]);
+    }
+    $u = ng_current_user();
+    if ($u) {
+        db()->prepare('UPDATE ng_presence SET last_seen = 0 WHERE user_id = ?')->execute([$u['id']]);
+    }
+    ng_set_cookie('', time() - 3600);
+    ng_json(['ok' => true]);
+}
+
+function action_me(): void
+{
+    $u = ng_require_user();
+    $cfg = ng_config();
+    $st = db()->prepare('SELECT x, y FROM ng_presence WHERE user_id = ?');
+    $st->execute([$u['id']]);
+    $pos = $st->fetch();
+    ng_json([
+        'user' => $u,
+        'appName' => $cfg['app_name'] ?? 'NotGather',
+        'iceServers' => $cfg['ice_servers'] ?? [],
+        'world' => ng_world(),
+        'zones' => ng_zones(),
+        'lastPos' => $pos ? ['x' => (int)$pos['x'], 'y' => (int)$pos['y']] : null,
+    ]);
+}
+
+/**
+ * A kliens 1–3 másodpercenként hívja. Egy kérésben:
+ *  - elküldi a saját állapotát (jelenlét),
+ *  - leadja a kimenő WebRTC jelzéseket,
+ *  - megkapja a neki szóló jelzéseket, a többiek állapotát és az új üzeneteket.
+ * Azonnal válaszol, soha nem várakozik.
+ */
+function action_sync(): void
+{
+    $u = ng_require_user();
+    $b = ng_body();
+    $now = time();
+    $timeout = (int)(ng_config()['presence_timeout'] ?? 20);
+    $peer = ng_peer_id($b['peer'] ?? '');
+    if ($peer === '') {
+        ng_fail('bad_peer');
+    }
+    $pdo = db();
+
+    // Másik ablak/gép átvette a helyet?
+    $st = $pdo->prepare('SELECT peer_id, last_seen FROM ng_presence WHERE user_id = ?');
+    $st->execute([$u['id']]);
+    $cur = $st->fetch();
+    if ($cur && $cur['peer_id'] !== $peer && (int)$cur['last_seen'] >= $now - $timeout && empty($b['claim'])) {
+        ng_json(['kicked' => true]);
+    }
+
+    $s = is_array($b['state'] ?? null) ? $b['state'] : [];
+    $status = in_array($s['status'] ?? '', ['available', 'busy', 'away'], true) ? $s['status'] : 'available';
+    $zone = isset($s['zone']) && is_numeric($s['zone']) ? (int)$s['zone'] : null;
+    $call = isset($s['call']) && is_numeric($s['call']) ? (int)$s['call'] : null;
+    $pdo->prepare(
+        'INSERT INTO ng_presence (user_id, peer_id, x, y, zone_id, status, mic, cam, screen, call_with, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE peer_id = VALUES(peer_id), x = VALUES(x), y = VALUES(y), zone_id = VALUES(zone_id),
+           status = VALUES(status), mic = VALUES(mic), cam = VALUES(cam), screen = VALUES(screen),
+           call_with = VALUES(call_with), last_seen = VALUES(last_seen)'
+    )->execute([
+        $u['id'], $peer,
+        max(0, min(30000, (int)($s['x'] ?? 0))), max(0, min(30000, (int)($s['y'] ?? 0))),
+        $zone, $status,
+        empty($s['mic']) ? 0 : 1, empty($s['cam']) ? 0 : 1, empty($s['screen']) ? 0 : 1,
+        $call, $now,
+    ]);
+
+    // Kimenő jelzések
+    $out = is_array($b['out'] ?? null) ? array_slice($b['out'], 0, 50) : [];
+    if ($out) {
+        $ins = $pdo->prepare('INSERT INTO ng_signals (to_peer, from_peer, from_user, payload, created_at) VALUES (?, ?, ?, ?, ?)');
+        foreach ($out as $sig) {
+            $to = ng_peer_id($sig['to'] ?? '');
+            $payload = json_encode($sig['data'] ?? null, JSON_UNESCAPED_UNICODE);
+            if ($to === '' || $payload === false || strlen($payload) > 65000) {
+                continue;
+            }
+            $ins->execute([$to, $peer, $u['id'], $payload, $now]);
+        }
+    }
+
+    // Bejövő jelzések (kiolvasás után törlődnek)
+    $st = $pdo->prepare('SELECT id, from_peer, from_user, payload FROM ng_signals WHERE to_peer = ? ORDER BY id LIMIT 100');
+    $st->execute([$peer]);
+    $signals = [];
+    $ids = [];
+    foreach ($st->fetchAll() as $r) {
+        $ids[] = (int)$r['id'];
+        $signals[] = ['from' => $r['from_peer'], 'user' => (int)$r['from_user'], 'data' => json_decode($r['payload'], true)];
+    }
+    if ($ids) {
+        $pdo->exec('DELETE FROM ng_signals WHERE id IN (' . implode(',', $ids) . ')');
+    }
+    if (mt_rand(1, 30) === 1) {
+        $pdo->prepare('DELETE FROM ng_signals WHERE created_at < ?')->execute([$now - 120]);
+    }
+
+    // Mindenki állapota (kis csapat, ezért egyszerűen mindenkit visszaadunk)
+    $rows = $pdo->query(
+        'SELECT u.id, u.display_name, u.color, u.emoji, p.peer_id, p.x, p.y, p.zone_id, p.status,
+                p.mic, p.cam, p.screen, p.call_with, p.last_seen
+         FROM ng_users u LEFT JOIN ng_presence p ON p.user_id = u.id ORDER BY u.display_name'
+    )->fetchAll();
+    $users = [];
+    foreach ($rows as $r) {
+        $online = $r['last_seen'] !== null && (int)$r['last_seen'] >= $now - $timeout;
+        $users[] = [
+            'id' => (int)$r['id'],
+            'name' => $r['display_name'],
+            'color' => $r['color'],
+            'emoji' => $r['emoji'],
+            'online' => $online,
+            'peerId' => $online ? $r['peer_id'] : null,
+            'x' => (int)$r['x'],
+            'y' => (int)$r['y'],
+            'zone' => $r['zone_id'] === null ? null : (int)$r['zone_id'],
+            'status' => $r['status'] ?? 'available',
+            'mic' => (bool)$r['mic'],
+            'cam' => (bool)$r['cam'],
+            'screen' => (bool)$r['screen'],
+            'call' => $r['call_with'] === null ? null : (int)$r['call_with'],
+        ];
+    }
+
+    // Új üzenetek: közös, szobák, és a saját privát beszélgetések
+    $last = (int)($b['lastMsg'] ?? 0);
+    $messages = [];
+    if ($last > 0) {
+        $st = $pdo->prepare(
+            "SELECT * FROM ng_messages WHERE id > ? AND (scope IN ('global','zone') OR (scope = 'dm' AND (target_id = ? OR sender_id = ?)))
+             ORDER BY id LIMIT 200"
+        );
+        $st->execute([$last, $u['id'], $u['id']]);
+        $messages = array_map('ng_message_row', $st->fetchAll());
+    }
+
+    ng_json([
+        'now' => $now,
+        'users' => $users,
+        'signals' => $signals,
+        'messages' => $messages,
+        'mapVersion' => (int)ng_setting('map_version', '1'),
+    ]);
+}
+
+function action_leave(): void
+{
+    $u = ng_current_user();
+    if (!$u) {
+        ng_json(['ok' => true]);
+    }
+    $raw = file_get_contents('php://input');
+    $b = json_decode($raw === false ? '' : $raw, true);
+    $peer = ng_peer_id(is_array($b) ? ($b['peer'] ?? '') : '');
+    db()->prepare('UPDATE ng_presence SET last_seen = 0 WHERE user_id = ? AND peer_id = ?')->execute([$u['id'], $peer]);
+    ng_json(['ok' => true]);
+}
+
+function action_chat_send(): void
+{
+    $u = ng_require_user();
+    $b = ng_body();
+    $scope = in_array($b['scope'] ?? '', ['global', 'zone', 'dm'], true) ? $b['scope'] : 'global';
+    $target = $scope === 'global' ? 0 : (int)($b['targetId'] ?? 0);
+    $body = ng_str($b['body'] ?? '', 4000);
+    if ($body === '' || ($scope !== 'global' && $target <= 0)) {
+        ng_fail('empty');
+    }
+    $now = time();
+    db()->prepare('INSERT INTO ng_messages (sender_id, scope, target_id, body, created_at) VALUES (?, ?, ?, ?, ?)')
+        ->execute([$u['id'], $scope, $target, $body, $now]);
+    $id = (int)db()->lastInsertId();
+    ng_json(['message' => [
+        'id' => $id, 'senderId' => $u['id'], 'scope' => $scope, 'targetId' => $target, 'body' => $body, 'at' => $now,
+    ]]);
+}
+
+// Az utolsó üzenetek betöltése belépéskor (közös + szobák + saját privátok).
+function action_chat_history(): void
+{
+    $u = ng_require_user();
+    $st = db()->prepare(
+        "SELECT * FROM (
+           SELECT * FROM ng_messages
+           WHERE scope IN ('global','zone') OR (scope = 'dm' AND (target_id = ? OR sender_id = ?))
+           ORDER BY id DESC LIMIT 300
+         ) t ORDER BY id"
+    );
+    $st->execute([$u['id'], $u['id']]);
+    $rows = array_map('ng_message_row', $st->fetchAll());
+    $maxId = (int)db()->query('SELECT COALESCE(MAX(id), 0) FROM ng_messages')->fetchColumn();
+    ng_json(['messages' => $rows, 'lastId' => $maxId]);
+}
+
+function action_profile(): void
+{
+    $u = ng_require_user();
+    $b = ng_body();
+    $name = ng_str($b['name'] ?? '', 40);
+    if ($name === '') {
+        ng_fail('name_required');
+    }
+    $emoji = ng_str($b['emoji'] ?? '', 4);
+    db()->prepare('UPDATE ng_users SET display_name = ?, color = ?, emoji = ? WHERE id = ?')
+        ->execute([$name, ng_color($b['color'] ?? ''), $emoji, $u['id']]);
+    ng_json(['ok' => true, 'user' => ['name' => $name, 'color' => ng_color($b['color'] ?? ''), 'emoji' => $emoji]]);
+}
+
+function action_password(): void
+{
+    $u = ng_require_user();
+    $b = ng_body();
+    $old = is_string($b['old'] ?? null) ? $b['old'] : '';
+    $new = is_string($b['new'] ?? null) ? $b['new'] : '';
+    if (strlen($new) < 6) {
+        ng_fail('password_too_short');
+    }
+    $st = db()->prepare('SELECT pass_hash FROM ng_users WHERE id = ?');
+    $st->execute([$u['id']]);
+    if (!password_verify($old, (string)$st->fetchColumn())) {
+        ng_fail('invalid_password', 403);
+    }
+    db()->prepare('UPDATE ng_users SET pass_hash = ? WHERE id = ?')->execute([password_hash($new, PASSWORD_DEFAULT), $u['id']]);
+    ng_json(['ok' => true]);
+}
+
+function action_map_save(): void
+{
+    ng_require_admin();
+    $b = ng_body();
+    $w = max(600, min(6000, (int)($b['world']['w'] ?? 1600)));
+    $h = max(400, min(6000, (int)($b['world']['h'] ?? 1000)));
+    $zones = is_array($b['zones'] ?? null) ? array_slice($b['zones'], 0, 100) : [];
+    $pdo = db();
+    $pdo->beginTransaction();
+    try {
+        $keep = [];
+        $upd = $pdo->prepare('UPDATE ng_zones SET name = ?, kind = ?, x = ?, y = ?, w = ?, h = ?, color = ? WHERE id = ?');
+        $ins = $pdo->prepare('INSERT INTO ng_zones (name, kind, x, y, w, h, color) VALUES (?, ?, ?, ?, ?, ?, ?)');
+        foreach ($zones as $z) {
+            if (!is_array($z)) {
+                continue;
+            }
+            $name = ng_str($z['name'] ?? '', 64);
+            $vals = [
+                $name === '' ? 'Szoba' : $name,
+                ($z['kind'] ?? '') === 'quiet' ? 'quiet' : 'talk',
+                max(0, min($w - 40, (int)($z['x'] ?? 0))),
+                max(0, min($h - 40, (int)($z['y'] ?? 0))),
+                max(40, min($w, (int)($z['w'] ?? 200))),
+                max(40, min($h, (int)($z['h'] ?? 150))),
+                ng_color($z['color'] ?? ''),
+            ];
+            $id = (int)($z['id'] ?? 0);
+            if ($id > 0) {
+                $upd->execute(array_merge($vals, [$id]));
+                $keep[] = $id;
+            } else {
+                $ins->execute($vals);
+                $keep[] = (int)$pdo->lastInsertId();
+            }
+        }
+        if ($keep) {
+            $pdo->exec('DELETE FROM ng_zones WHERE id NOT IN (' . implode(',', array_map('intval', $keep)) . ')');
+        } else {
+            $pdo->exec('DELETE FROM ng_zones');
+        }
+        ng_set_setting('world_w', (string)$w);
+        ng_set_setting('world_h', (string)$h);
+        ng_set_setting('map_version', (string)((int)ng_setting('map_version', '1') + 1));
+        $pdo->commit();
+    } catch (Throwable $e) {
+        $pdo->rollBack();
+        throw $e;
+    }
+    ng_json(['ok' => true, 'world' => ng_world(), 'zones' => ng_zones()]);
+}
+
+function action_users_list(): void
+{
+    ng_require_admin();
+    $rows = db()->query('SELECT id, username, display_name, is_admin FROM ng_users ORDER BY display_name')->fetchAll();
+    ng_json(['users' => array_map(function ($r) {
+        return ['id' => (int)$r['id'], 'username' => $r['username'], 'name' => $r['display_name'], 'isAdmin' => (bool)$r['is_admin']];
+    }, $rows)]);
+}
+
+function action_user_save(): void
+{
+    $me = ng_require_admin();
+    $b = ng_body();
+    $id = (int)($b['id'] ?? 0);
+    $username = strtolower(ng_str($b['username'] ?? '', 64));
+    $name = ng_str($b['name'] ?? '', 40);
+    $password = is_string($b['password'] ?? null) ? $b['password'] : '';
+    $isAdmin = empty($b['isAdmin']) ? 0 : 1;
+    if (!preg_match('/^[a-z0-9._-]{2,64}$/', $username)) {
+        ng_fail('bad_username');
+    }
+    if ($name === '') {
+        $name = $username;
+    }
+    $pdo = db();
+    $st = $pdo->prepare('SELECT id FROM ng_users WHERE username = ? AND id <> ?');
+    $st->execute([$username, $id]);
+    if ($st->fetch()) {
+        ng_fail('username_taken', 409);
+    }
+    if ($id > 0) {
+        if ($id === $me['id']) {
+            $isAdmin = 1; // saját magát nem fokozhatja le
+        }
+        $pdo->prepare('UPDATE ng_users SET username = ?, display_name = ?, is_admin = ? WHERE id = ?')
+            ->execute([$username, $name, $isAdmin, $id]);
+        if ($password !== '') {
+            if (strlen($password) < 6) {
+                ng_fail('password_too_short');
+            }
+            $pdo->prepare('UPDATE ng_users SET pass_hash = ? WHERE id = ?')->execute([password_hash($password, PASSWORD_DEFAULT), $id]);
+            $pdo->prepare('DELETE FROM ng_tokens WHERE user_id = ?')->execute([$id]);
+        }
+    } else {
+        if (strlen($password) < 6) {
+            ng_fail('password_too_short');
+        }
+        $colors = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#3b82f6', '#8b5cf6', '#ec4899'];
+        $pdo->prepare('INSERT INTO ng_users (username, pass_hash, display_name, color, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+            ->execute([$username, password_hash($password, PASSWORD_DEFAULT), $name, $colors[array_rand($colors)], $isAdmin, time()]);
+    }
+    ng_json(['ok' => true]);
+}
+
+function action_user_delete(): void
+{
+    $me = ng_require_admin();
+    $id = (int)(ng_body()['id'] ?? 0);
+    if ($id <= 0 || $id === $me['id']) {
+        ng_fail('cannot_delete');
+    }
+    $pdo = db();
+    $pdo->prepare('DELETE FROM ng_tokens WHERE user_id = ?')->execute([$id]);
+    $pdo->prepare('DELETE FROM ng_presence WHERE user_id = ?')->execute([$id]);
+    $pdo->prepare('DELETE FROM ng_users WHERE id = ?')->execute([$id]);
+    ng_json(['ok' => true]);
+}
