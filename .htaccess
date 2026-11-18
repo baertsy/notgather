@@ -1,0 +1,10 @@
+# A JS és CSS fájlokat a böngésző mindig ellenőrizze frissítés után,
+# így egy új verzió feltöltése után nem a régi fut.
+<IfModule mod_headers.c>
+  <FilesMatch "\.(js|css|html)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
+<IfModule mod_mime.c>
+  AddType text/javascript .js
+</IfModule>
